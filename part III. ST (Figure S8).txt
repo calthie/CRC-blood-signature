@@ -1,0 +1,256 @@
+mkdir -p ~/project/ST_analysis/data/GSE226997
+cd ~/project/ST_analysis/data/GSE226997
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(hdf5r)
+library(glmGamPoi)
+library(future)
+
+
+options(future.globals.maxSize = 8000*1024^2)
+P1 <- Load10X_Spatial(data.dir = "./analysis/P1")
+P2 <- Load10X_Spatial(data.dir = "./analysis/P2")
+P3 <- Load10X_Spatial(data.dir = "./analysis/P3")
+
+P1 <- SCTransform(P1, assay = "Spatial", verbose = FALSE)
+P1 <- RunPCA(P1, assay = "SCT", verbose = FALSE)
+P2 <- SCTransform(P2, assay = "Spatial", verbose = FALSE)
+P2 <- RunPCA(P2, assay = "SCT", verbose = FALSE)
+P3 <- SCTransform(P3, assay = "Spatial", verbose = FALSE)
+P3 <- RunPCA(P3, assay = "SCT", verbose = FALSE)
+
+load_path <- "C:/CRC_Mega_Harmony_Clustered_Annotated.rds"
+CRC_Mega <- readRDS(load_path)
+table(CRC_Mega$CellType)
+sc_ref <- CRC_Mega 
+sc_ref <- subset(sc_ref, subset = CellType != "Unassigned")
+
+Idents(sc_ref) <- "CellType"
+set.seed(123) 
+sc_ref <- subset(sc_ref, downsample = 1000) 
+sc_ref <- SCTransform(sc_ref, ncells = 3000, verbose = FALSE) 
+
+anchors <- FindTransferAnchors(reference = sc_ref, query = P1, normalization.method = "SCT")
+predictions.assay <- TransferData(anchorset = anchors, refdata = sc_ref$CellType, prediction.assay = TRUE, weight.reduction =P1[["pca"]], dims = 1:30)
+P1[["predictions"]] <- predictions.assay
+DefaultAssay(P1) <- "predictions"
+p1_epi <- SpatialFeaturePlot(P1, features = "Epithelial-cells", pt.size.factor = 1.6, alpha = c(0.1, 1))
+p1_epi
+p1_cd4 <- SpatialFeaturePlot(P1, features = "CD4T-cells", pt.size.factor = 1.6, alpha = c(0.1, 1))
+p1_cd4
+p1_cd8 <- SpatialFeaturePlot(P1, features = "CD8T-cells", pt.size.factor = 1.6, alpha = c(0.1, 1))
+p1_cd8
+t_scores <- FetchData(P1, vars = c("CD4T-cells", "CD8T-cells"))
+P1$T_cells <- t_scores$`CD4T-cells` + t_scores$`CD8T-cells`
+p1_t_cells <- SpatialFeaturePlot(P1, features = "T_cells", pt.size.factor = 1.6, alpha = c(0.1, 1))
+p1_t_cells
+
+
+anchors <- FindTransferAnchors(reference = sc_ref, query = P2, normalization.method = "SCT")
+predictions.assay <- TransferData(anchorset = anchors, refdata = sc_ref$CellType, prediction.assay = TRUE, weight.reduction =P2[["pca"]], dims = 1:30)
+P2[["predictions"]] <- predictions.assay
+DefaultAssay(P2) <- "predictions"
+p2_epi <- SpatialFeaturePlot(P2, features = "Epithelial-cells", pt.size.factor = 1.6, alpha = c(0.1, 1))
+p2_epi
+p2_cd4 <- SpatialFeaturePlot(P2, features = "CD4T-cells", pt.size.factor = 1.6, alpha = c(0.1, 1))
+p2_cd4
+p2_cd8 <- SpatialFeaturePlot(P2, features = "CD8T-cells", pt.size.factor = 1.6, alpha = c(0.1, 1))
+p2_cd8
+t_scores <- FetchData(P2, vars = c("CD4T-cells", "CD8T-cells"))
+P2$T_cells <- t_scores$`CD4T-cells` + t_scores$`CD8T-cells`
+p2_t_cells <- SpatialFeaturePlot(P2, features = "T_cells", pt.size.factor = 1.6, alpha = c(0.1, 1))
+p2_t_cells
+
+
+anchors <- FindTransferAnchors(reference = sc_ref, query = P3, normalization.method = "SCT")
+predictions.assay <- TransferData(anchorset = anchors, refdata = sc_ref$CellType, prediction.assay = TRUE, weight.reduction =P3[["pca"]], dims = 1:30)
+P3[["predictions"]] <- predictions.assay
+DefaultAssay(P3) <- "predictions"
+p3_epi <- SpatialFeaturePlot(P3, features = "Epithelial-cells", pt.size.factor = 1.6, alpha = c(0.1, 1))
+p3_epi
+p3_cd4 <- SpatialFeaturePlot(P3, features = "CD4T-cells", pt.size.factor = 1.6, alpha = c(0.1, 1))
+p3_cd4
+p3_cd8 <- SpatialFeaturePlot(P3, features = "CD8T-cells", pt.size.factor = 1.6, alpha = c(0.1, 1))
+p3_cd8
+t_scores <- FetchData(P3, vars = c("CD4T-cells", "CD8T-cells"))
+P3$T_cells <- t_scores$`CD4T-cells` + t_scores$`CD8T-cells`
+p3_t_cells <- SpatialFeaturePlot(P3, features = "T_cells", pt.size.factor = 1.6, alpha = c(0.1, 1))
+p3_t_cells
+
+
+DefaultAssay(P1) <- "SCT"
+p1_gene <- SpatialFeaturePlot(P1, features = "CEACAM5", pt.size.factor = 1.6, alpha = c(0.1, 1))
+p1_coloc_visual <- p1_epi + p1_gene
+ggsave("Spatial_Colocalization_Visual.pdf", p_coloc_visual, width = 12, height = 5)
+coloc_data_P1 <- FetchData(P1, vars = c("CEACAM5", "Epithelial-cells"))
+colnames(coloc_data_P1) <- c("Gene_Expr", "Cell_Score")
+cor_result_P1 <- cor.test(coloc_data_P1$Gene_Expr, coloc_data_P1$Cell_Score, method = "pearson")
+print(cor_result_P1)
+
+library(ggplot2)
+p_scatter <- ggplot(coloc_data_P1, aes(x = Cell_Score, y = Gene_Expr)) +
+                    geom_point(alpha = 0.5, color = "#2c3e50", size = 1.5) + 
+                    geom_smooth(method = "lm", color = "#e74c3c", se = TRUE) + 
+                    theme_classic() +
+                    labs(
+                         x = "Epithelial cells Abundance (Spot Score)",
+                         y = "CEACAM5 Expression (SCT Data)",
+                         title = "Spatial Colocalization in P1",
+                         subtitle = sprintf("Pearson R = %.3f, P-value = %.2e", cor_result_P1$estimate, cor_result_P1$p.value)) +
+                    theme(
+                          plot.title = element_text(face = "bold", size = 14),
+                          axis.title = element_text(face = "bold")
+                          )
+p_scatter
+ggsave("Spatial_Scatter.pdf", p_scatter, width = 5, height = 5)
+
+p_stage1 <- SpatialFeaturePlot(P1, features = target_cell) + ggtitle("Stage I + II")
+p_stage2 <- SpatialFeaturePlot(P2, features = target_cell) + ggtitle("Stage III")
+p_stage3 <- SpatialFeaturePlot(P3, features = target_cell) + ggtitle("Stage IV")
+
+##Signature score
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(ggpubr)
+library(dplyr)
+
+target_cell <- "Epithelial-cells"
+target_genes <- c("CEACAM5", "MUC16", "GGT1", "GOT1", "GOT2", "HSP90AA1")
+
+signatures <- list(
+                   C5DC_Production = c("AASS", "AADAT", "GCDH", "DHTKD1"),
+                   Urea_Production = c("ARG1", "ARG2"),
+                   CA19_9_Biosynthesis = c("FUT3", "B3GALT5", "ST3GAL3", "ST3GAL4")
+                   )
+add_signatures <- function(obj) {
+                                DefaultAssay(obj) <- "SCT"
+                                obj <- AddModuleScore(obj, features = signatures, name = "Sig_")
+                                obj$C5DC_Production <- obj$Sig_1
+                                obj$Urea_Production <- obj$Sig_2
+                                obj$CA19_9_Biosynthesis <- obj$Sig_3
+                                return(obj)
+                                }
+P1 <- add_signatures(P1)
+P2 <- add_signatures(P2)
+P3 <- add_signatures(P3)
+all_features <- c(target_genes, "C5DC_Production", "Urea_Production", "CA19_9_Biosynthesis")
+
+process_and_plot_sample <- function(obj, sample_name, stage_name) {
+                                                                   available_genes <- intersect(all_features, rownames(obj))
+                                                                   available_meta <- intersect(all_features, colnames(obj@meta.data)) 
+                                                                   valid_features <- unique(c(available_genes, available_meta))
+                                                                   missing_features <- setdiff(all_features, valid_features)
+                                                                   if (length(missing_features) > 0) {
+                                                                                                      cat(paste("[Notice] These features are missing in", sample_name, "and will be skipped:", paste(missing_features, collapse=", "), "\n"))
+                                                                                                      }
+vars_to_fetch <- c(target_cell, valid_features)
+df <- FetchData(obj, vars = vars_to_fetch)
+colnames(df)[1] <- "Epi_Score" 
+df$Sample <- sample_name
+df$Stage <- stage_name
+  
+p_epi <- SpatialFeaturePlot(obj, features = target_cell, pt.size.factor = 1.6, alpha = c(0.1, 1)) + ggtitle(paste(sample_name, "- Epithelial Distribution"))
+plot_list <- list()
+for (feat in valid_features) {
+                             p_spatial <- SpatialFeaturePlot(obj, features = feat, pt.size.factor = 1.6, alpha = c(0.1, 1)) +
+                             theme(legend.position = "right")
+                             feat_values <- df[[feat]]
+                             if (sd(feat_values, na.rm = TRUE) > 0) {
+                                                                     cor_res <- cor.test(df$Epi_Score, feat_values, method = "pearson")
+                                                                     sub_text <- sprintf("R = %.3f, P = %.2e", cor_res$estimate, cor_res$p.value)
+                                                                    } 
+                             else {
+                                   sub_text <- "R = NA, P = NA (All values are 0)"
+                                  }
+                             p_scatter <- ggplot(df, aes(x = Epi_Score, y = .data[[feat]])) +
+                                                 geom_point(alpha = 0.3, color = "#2c3e50", size = 1) +
+                                                 geom_smooth(method = "lm", color = "#e74c3c", se = TRUE) +
+                                                 theme_classic() +
+                                                 labs(x = "Epithelial Score", y = feat, subtitle = sub_text) +
+                                                 theme(plot.subtitle = element_text(color = "red", face = "bold", size = 10))
+                             p_combined <- p_spatial + p_scatter + plot_layout(widths = c(1, 1))
+                             plot_list[[feat]] <- p_combined
+                             }
+final_sample_plot <- p_epi / wrap_plots(plot_list, ncol = 2) + plot_layout(heights = c(1, 5))
+file_name <- paste0("Group_", sample_name, "_Spatial_and_Coloc.pdf")
+ggsave(file_name, final_sample_plot, width = 18, height = 25, limitsize = FALSE)
+  
+for (miss_feat in missing_features) {
+                                    df[[miss_feat]] <- NA
+                                     }
+return(df)
+}
+
+df_P1 <- process_and_plot_sample(P1, sample_name = "P1", stage_name = "T3N0M0")
+df_P2 <- process_and_plot_sample(P2, sample_name = "P2", stage_name = "T3N1M1")
+df_P3 <- process_and_plot_sample(P3, sample_name = "P3", stage_name = "T3N1M0")
+
+all_data <- rbind(df2 = df_P2, df3 = df_P3)
+epi_threshold <- 0.2
+epi_data <- subset(all_data, Epi_Score > epi_threshold)
+epi_data$Stage <- factor(epi_data$Stage, levels = c("T3N0M0", "T3N1M0", "T3N1M1"))
+my_comparisons <- list(c("T3N0M0", "T3N1M0"),c("T3N1M0", "T3N1M1"), c("T3N0M0", "T3N1M1") )
+
+stat_plot_list <- list()
+for (feat in all_features) {
+                            p_stat <- ggplot(epi_data, aes(x = Stage, y = .data[[feat]], fill = Stage)) +
+                            geom_violin(trim = FALSE, alpha = 0.6, color = NA) +
+                            geom_boxplot(width = 0.2, fill = "white", color = "black", alpha = 0.8) +
+                            scale_fill_manual(values = c("T3N0M0" = "#6BAED6", "T3N1M0" = "#FD8D3C", "T3N1M1" = "#E31A1C")) +
+                            theme_classic() +
+                            labs(x = "", y = feat, title = feat) +
+                            theme(
+                                  plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+                                  axis.text.x = element_text(size = 12, face = "bold", color = "black"),
+                                  legend.position = "none"
+                                  ) +
+                            stat_compare_means(comparisons = my_comparisons, method = "wilcox.test", label = "p.format")
+                            stat_plot_list[[feat]] <- p_stat
+                            }
+final_stat_plot <- wrap_plots(stat_plot_list, ncol = 3)
+ggsave("Cross_Stage_Evolution.pdf", final_stat_plot, width = 15, height = 15)
+
+stats_list <- list()
+for (feat in all_features) {
+                           for (comp in my_comparisons) {   
+                                                        group1_name <- comp[1]  
+                                                        group2_name <- comp[2]  
+                                                        g1_data <- na.omit(epi_data[[feat]][epi_data$Stage == group1_name])
+                                                        g2_data <- na.omit(epi_data[[feat]][epi_data$Stage == group2_name])
+                                                        if (length(g1_data) > 3 & length(g2_data) > 3) {
+                                                                                                        mean_g1 <- mean(g1_data)
+                                                                                                        mean_g2 <- mean(g2_data)
+                                                                                                        fc <- (mean_g2 + 1e-4) / (mean_g1 + 1e-4)
+                                                                                                        log2fc <- log2(fc)
+                                                                                                        wt <- wilcox.test(g2_data, g1_data)
+                                                                                                        pval <- wt$p.value
+                                                                                                        res_row <- data.frame(
+                                                                                                                               Feature = feat,
+                                                                                                                               Comparison = paste0(group2_name, " vs ", group1_name),
+                                                                                                                               Mean_Ref = mean_g1,
+                                                                                                                               Mean_Test = mean_g2,
+                                                                                                                               Fold_Change = fc,
+                                                                                                                               Log2_Fold_Change = log2fc,
+                                                                                                                               P_value = pval
+                                                                                                                               )
+                                                                                                        stats_list[[paste(feat, group2_name, group1_name, sep="_")]] <- res_row
+                                                                                                        } 
+                                                         else {
+                                                               res_row <- data.frame(
+                                                                                     Feature = feat,
+                                                                                     Comparison = paste0(group2_name, " vs ", group1_name),
+                                                                                     Mean_Ref = NA, Mean_Test = NA, Fold_Change = NA, Log2_Fold_Change = NA, P_value = NA
+                                                                                     )
+                                                         stats_list[[paste(feat, group2_name, group1_name, sep="_")]] <- res_row
+                                                         }
+                          }
+}
+final_stats_table <- do.call(rbind, stats_list)
+rownames(final_stats_table) <- NULL
+valid_idx <- !is.na(final_stats_table$P_value)
+final_stats_table$FDR <- NA
+final_stats_table$FDR[valid_idx] <- p.adjust(final_stats_table$P_value[valid_idx], method = "fdr")
+file_out <- "Group_5_Updated_Statistics_Table.csv"

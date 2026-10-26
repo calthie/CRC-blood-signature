@@ -1,0 +1,71 @@
+# CEA negtive (5 ng/mL)
+data_cea_normal <- data_surv_merged[which(data_surv_merged$CEA <= 5), ]
+data_cea_normal <- na.omit(data_cea_normal[, c("Sample_ID", "Risk_Group", "Time_month", "Overall_survival")])
+data_cea_normal$OS_time <- as.numeric(data_cea_normal$Time_month)
+data_cea_normal$OS_status <- as.numeric(data_cea_normal$Overall_survival)
+data_cea_normal$Risk_Group <- factor(data_cea_normal$Risk_Group, levels = c("low", "high"))
+
+cox_subgroup <- coxph(Surv(OS_time, OS_status) ~ Risk_Group, data = data_cea_normal)
+cat("\nCox Regression Summary (CEA <= 5 Subgroup):\n")
+fit_subgroup <- survfit(Surv(OS_time, OS_status) ~ Risk_Group, data = data_cea_normal)
+pdf("KM_Survival_CEANormal.pdf", width = 7, height = 7)
+p_subgroup <- ggsurvplot(
+                         fit_subgroup, data = data_cea_normal,
+                         pval = TRUE, conf.int = TRUE, risk.table = TRUE, risk.table.col = "strata",
+                         palette = c("#2E9FDF", "#E7B800"), 
+                         title = "Overall Survival in CEA-Normal (<= 5) Patients",
+                         xlab = "Time (Months)", ylab = "Overall Survival Probability",
+                         legend.title = "Risk Group", legend.labs = c("Low Risk", "High Risk")
+                         )
+print(p_subgroup)
+dev.off()
+
+# LRT AND Model Fit Comparison
+data_lrt <- data_surv_merged[, c("Sample_ID", "Risk_Score", "Age", "Actual_Stage", "CEA", "Time_month", "Overall_survival")]
+data_lrt <- na.omit(data_lrt)
+data_lrt$OS_time <- as.numeric(data_lrt$Time_month)
+data_lrt$OS_status <- as.numeric(data_lrt$Overall_survival)
+data_lrt$Age <- factor(data_lrt$Age, levels = c("< 65", ">= 65"))
+data_lrt$Actual_Stage <- factor(data_lrt$Actual_Stage, levels = c("Stage_I_II", "Stage_III"))
+
+data_lrt$log_CEA <- log2(data_lrt$CEA + 1)
+model_base <- coxph(Surv(OS_time, OS_status) ~ Actual_Stage + Age, data = data_lrt)
+model_cea  <- coxph(Surv(OS_time, OS_status) ~ Actual_Stage + Age + log_CEA, data = data_lrt)
+model_risk <- coxph(Surv(OS_time, OS_status) ~ Actual_Stage + Age + Risk_Score, data = data_lrt)
+model_both <- coxph(Surv(OS_time, OS_status) ~ Actual_Stage + Age + log_CEA + Risk_Score, data = data_lrt)
+
+cat("\n--- 1. AIC Comparison (Lower is better) ---\n")
+aic_results <- AIC(model_base, model_cea, model_risk)
+print(aic_results)
+
+cat("\n--- 2. Likelihood Ratio Test (LRT) ---\n")
+cat("LRT: Base Model vs. Model with CEA\n")
+print(anova(model_base, model_cea))
+
+cat("\nLRT: Base Model vs. Model with Risk Score\n")
+print(anova(model_base, model_risk))
+
+cat("\nLRT: Model with CEA vs. Combined Model (CEA + Risk Score)\n")
+lrt_incremental <- anova(model_cea, model_both)
+print(lrt_incremental)
+
+p_val_incremental <- lrt_incremental[2, ncol(lrt_incremental)]
+
+######
+library(ggplot2)
+model_comparison <- data.frame(Model = c("Clinical + CEA", "Clinical + CEA + Risk Score"),AIC = c(154.4040, 143.7953))
+model_comparison$Model <- factor(model_comparison$Model, levels = c("Clinical + CEA", "Clinical + CEA + Risk Score"))
+
+p_aic <- ggplot(model_comparison, aes(x = Model, y = AIC, fill = Model)) +
+                geom_bar(stat = "identity", width = 0.5, color = "black") +
+                geom_text(aes(label = round(AIC, 1)), vjust = -0.5, size = 5) +
+                scale_fill_manual(values = c("#BDBDBD", "#E7B800")) + 
+                theme_classic() +
+                labs(title = "Model Goodness-of-fit Comparison",subtitle = "Likelihood Ratio Test: P < 0.001 ***",y = "AIC Value (Lower is better)",x = "") +
+                coord_cartesian(ylim = c(130, 160)) + 
+                theme(legend.position = "none",
+                      axis.text.x = element_text(size = 12, face = "bold"),
+                      axis.text.y = element_text(size = 11),
+                      axis.title.y = element_text(size = 12, face = "bold"),
+                      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+                      plot.subtitle = element_text(size = 12, color = "red", hjust = 0.5))

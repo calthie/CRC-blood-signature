@@ -1,0 +1,926 @@
+##GSE178318
+library(Seurat)
+library(stringr)
+# --- 1.  ---
+clinical_info_178318 <- data.frame(
+                                   GSM_ID = c("GSM5387667", "GSM5387662", "GSM5387660"),
+                                   Gender = c("Male", "Male", "Male"),
+                                   Age = c(71, 65, 58),
+                                   TNM_Stage = c("T4bN2bM1a", "T3N0M1a", "T4aN1cM1a"),
+                                   Stage_AJCC = c("IV", "IV", "IV"),
+                                   Histology = c("Adenocarcinoma", "Adenocarcinoma", "Adenocarcinoma"),
+                                   Location = c("Rectum", "Sigmoid colon", "Transverse colon"),
+                                   MSI_Status = c("MSS", "MSS", "MSS")
+                                   )
+# --- 2. ---
+data_dir <- "scRNA_ext_val/GSE178318_use/"
+counts_178318 <- ReadMtx(mtx = paste0(data_dir, "GSE178318_matrix.mtx.gz"),
+                         cells = paste0(data_dir, "GSE178318_barcodes.tsv.gz"),
+                         features = paste0(data_dir, "GSE178318_genes.tsv.gz"))
+seu_178318_all <- CreateSeuratObject(counts = counts_178318, project = "GSE178318", min.cells = 3, min.features = 200)
+seu_178318_all$Orig_Sample <- str_extract(colnames(seu_178318_all), "COL\\d+_CRC$")
+target_samples <- c("COL07_CRC", "COL12_CRC", "COL16_CRC")
+seu_178318_clean <- subset(seu_178318_all, subset = Orig_Sample %in% target_samples)
+
+seu_178318_clean$GSM_ID <- ifelse(seu_178318_clean$Orig_Sample == "COL07_CRC", "GSM5387667",
+                           ifelse(seu_178318_clean$Orig_Sample == "COL12_CRC", "GSM5387662",
+                           ifelse(seu_178318_clean$Orig_Sample == "COL16_CRC", "GSM5387660", "Error")))
+
+# --- 3.  ---
+seu_178318_clean$Dataset <- "GSE178318"
+seu_178318_clean$Treatment <- "Treatment-naive"
+seu_178318_clean$Tissue_Type <- "Primary_Tumor"
+
+match_idx <- match(seu_178318_clean$GSM_ID, clinical_info_178318$GSM_ID)
+seu_178318_clean$Gender <- clinical_info_178318$Gender[match_idx]
+seu_178318_clean$Age <- clinical_info_178318$Age[match_idx]
+seu_178318_clean$TNM_Stage <- clinical_info_178318$TNM_Stage[match_idx]
+seu_178318_clean$Stage_AJCC <- clinical_info_178318$Stage_AJCC[match_idx]
+seu_178318_clean$Histology <- clinical_info_178318$Histology[match_idx]
+seu_178318_clean$Location <- clinical_info_178318$Location[match_idx]
+seu_178318_clean$MSI_Status <- clinical_info_178318$MSI_Status[match_idx]
+
+rm(counts_178318, seu_178318_all); gc()
+##################################################################
+##GSE245552
+library(Seurat)
+library(stringr)
+
+# --- 1. (GSM7844829) ---
+clinical_info_245552 <- data.frame(
+  GSM_ID = c("GSM7844812", "GSM7844814", "GSM7844816", "GSM7844818", "GSM7844820", "GSM7844823", "GSM7844826", "GSM7844828", "GSM7844829", "GSM7844832", "GSM7844833", "GSM7844835", "GSM7844837", "GSM7844839", "GSM7844844", "GSM7844847"),
+  Gender = c("Female", "Male", "Female", "Female", "Male", "Female", "Male", "Male", "Male", "Female", "Male", "Male", "Male", "Male", "Female", "Male"),
+  Age = c(68, 70, 33, 54, 76, 67, 41, 73, 73, 73, 56, 69, 69, 48, 58, 63),
+  TNM_Stage = c("T3N2aM1a", "T3N1aM1a", "TxNxM1a", "T4bNxM1b", "T3N0M1a", "T4aN1aM1a", "T4aN0M1a", "T4aN0M1a", "T4aN0M1a", "T4aN2aM1a", "T4aN0M1a", "T4aN0M1a", "T4aN1aM1a", "T4aN0M1a", "T4aN1aM1a", "T3N0M1a"),
+  Stage_AJCC = c("IV", "IV", "IV", "IV", "IV", "IV", "IV", "IV", "IV", "IV", "IV", "IV", "IV", "IV", "IV", "IV"),
+  Histology = c("Adenocarcinoma", "Adenocarcinoma", "Adenocarcinoma", "Adenocarcinoma", "Adenocarcinoma", "Adenocarcinoma", "Adenocarcinoma", "Adenocarcinoma", "Adenocarcinoma", "Adenocarcinoma", "Adenocarcinoma", "Adenocarcinoma", "Adenocarcinoma", "Adenocarcinoma", "Adenocarcinoma", "Adenocarcinoma"),
+  Location = c("Transverse colon", "Rectum", "Rectum", "Rectum", "Rectum", "Ascending colon", "Rectum", "Rectum", "Rectum", "Descending colon", "Ascending colon", "Rectum", "Ascending colon", "Descending colon", "Transverse colon", "Sigmoid colon"),
+  MSI_Status = c("MSS", "MSS", "MSS", "MSS", "MSS", "MSS", "MSS", "MSS", "MSS", "MSS", "MSS", "MSS", "MSS", "MSS", "MSS", "MSS")
+)
+
+# --- 2.  ---
+data_dir <- "scRNA_ext_val/GSE245552_use/"
+all_matrix_files <- list.files(path = data_dir, pattern = "matrix.mtx.gz")
+sample_prefixes <- gsub("_matrix.mtx.gz$", "", all_matrix_files)
+seurat_list <- list()
+
+for (prefix in sample_prefixes) {
+                                 mat_file <- file.path(data_dir, paste0(prefix, "_matrix.mtx.gz"))
+                                 feat_file <- file.path(data_dir, paste0(prefix, "_features.tsv.gz"))
+                                 bar_file <- file.path(data_dir, paste0(prefix, "_barcodes.tsv.gz"))
+  
+                                 counts <- ReadMtx(mtx = mat_file, features = feat_file, cells = bar_file)
+                                 seu <- CreateSeuratObject(counts = counts, project = prefix, min.cells = 3, min.features = 200)
+                                 seu$GSM_ID <- str_split(prefix, "_")[[1]][1]
+                                 seurat_list[[prefix]] <- seu
+                                 }
+seu_245552_clean <- merge(x = seurat_list[[1]], y = seurat_list[-1], add.cell.ids = names(seurat_list), project = "GSE245552")
+rm(seurat_list, counts, seu); gc()
+
+# --- 3.  ---
+seu_245552_clean$Dataset <- "GSE245552"
+seu_245552_clean$Treatment <- "Treatment-naive"
+seu_245552_clean$Tissue_Type <- "Primary_Tumor"
+
+match_idx <- match(seu_245552_clean$GSM_ID, clinical_info_245552$GSM_ID)
+seu_245552_clean$Gender <- clinical_info_245552$Gender[match_idx]
+seu_245552_clean$Age <- clinical_info_245552$Age[match_idx]
+seu_245552_clean$TNM_Stage <- clinical_info_245552$TNM_Stage[match_idx]
+seu_245552_clean$Stage_AJCC <- clinical_info_245552$Stage_AJCC[match_idx]
+seu_245552_clean$Histology <- clinical_info_245552$Histology[match_idx]
+seu_245552_clean$Location <- clinical_info_245552$Location[match_idx]
+seu_245552_clean$MSI_Status <- clinical_info_245552$MSI_Status[match_idx]
+###############################################################
+##GSE294300
+
+library(Seurat)
+library(stringr)
+# --- 1.  ---
+clinical_info_294300 <- data.frame(
+  GSM_ID = c("GSM8901938","GSM8901939","GSM8901940","GSM8901942","GSM8901943","GSM8901944","GSM8901945","GSM8901947","GSM8901948","GSM8901949","GSM8901950","GSM8901951","GSM8901952","GSM8901953","GSM8901954","GSM8901955"),
+  Gender = c("Female","Male","Female","Female","Female","Female","Female","Male","Male","Female","Male","Male","Female","Female","Female","Male"),
+  Age = c(75,67,60,62,39,61,70,73,50,68,58,50,66,60,72,83),
+  TNM_Stage = rep(NA, 16), # 表格中为空
+  Stage_AJCC = c("III","III","III","III","II","II","II","I","II","I","II","I","I","III","III","I"),
+  Histology = rep("Adenocarcinoma", 16),
+  Location = c("Distal colon","Rectum","Rectum","Distal colon","Distal colon","Distal colon","Proximal colon","Distal colon","Rectum","Rectum","Rectum","Rectum","Rectum","Rectum","Proximal colon","Distal colon"),
+  MSI_Status = rep("MSS", 16)
+)
+
+# --- 2.  ---
+data_dir <- "scRNA_ext_val/GSE294300_use/use_all"
+all_matrix_files <- list.files(path = data_dir, pattern = "matrix.mtx.gz")
+sample_prefixes <- gsub("_matrix.mtx.gz$", "", all_matrix_files)
+seurat_list <- list()
+
+for (prefix in sample_prefixes) {
+                                mat_file <- file.path(data_dir, paste0(prefix, "_matrix.mtx.gz"))
+                                feat_file <- file.path(data_dir, paste0(prefix, "_features.tsv.gz"))
+                                bar_file <- file.path(data_dir, paste0(prefix, "_barcodes.tsv.gz"))
+  
+                                counts <- ReadMtx(mtx = mat_file, features = feat_file, cells = bar_file)
+                                seu <- CreateSeuratObject(counts = counts, project = prefix, min.cells = 3, min.features = 200)
+                                seu$GSM_ID <- str_extract(prefix, "^GSM\\d+") 
+                                seurat_list[[prefix]] <- seu
+                                }
+seu_294300_all <- merge(x = seurat_list[[1]], y = seurat_list[-1], add.cell.ids = names(seurat_list), project = "GSE294300")
+rm(seurat_list, counts, seu); gc()
+
+# --- 3. ---
+seu_294300_all$Dataset <- "GSE294300"
+seu_294300_all$Treatment <- "Treatment-naive"
+seu_294300_all$Tissue_Type <- "Primary_Tumor"
+
+match_idx <- match(seu_294300_all$GSM_ID, clinical_info_294300$GSM_ID)
+seu_294300_all$Gender <- clinical_info_294300$Gender[match_idx]
+seu_294300_all$Age <- clinical_info_294300$Age[match_idx]
+seu_294300_all$TNM_Stage <- clinical_info_294300$TNM_Stage[match_idx]
+seu_294300_all$Stage_AJCC <- clinical_info_294300$Stage_AJCC[match_idx]
+seu_294300_all$Histology <- clinical_info_294300$Histology[match_idx]
+seu_294300_all$Location <- clinical_info_294300$Location[match_idx]
+seu_294300_all$MSI_Status <- clinical_info_294300$MSI_Status[match_idx]
+
+##################################################################
+##GSE315534
+library(Seurat)
+library(stringr)
+
+# --- 1.  ---
+clinical_info_315534 <- data.frame(
+  GSM_ID = c("GSM9430353", "GSM9430356", "GSM9430359", "GSM9430362", "GSM9430364", "GSM9430366"),
+  Gender = c("Male", "Male", "Female", "Male", "Female", "Female"),
+  Age = c(68, 75, 66, 59, 67, 71),
+  TNM_Stage = c("T3aN2bM1b", "T3bN3M1a", "T3N2aM1a", "T2aN2aM0", "T3N1cM0", "T2N2M0"),
+  Stage_AJCC = c("IV", "IV", "IV", "III", "III", "III"),
+  Histology = rep("Adenocarcinoma", 6),
+  Location = rep(NA, 6), 
+  MSI_Status = rep("MSS", 6)
+)
+
+# --- 2.  ---
+data_dir <- "scRNA_ext_val/GSE315534_use"
+all_matrix_files <- list.files(path = data_dir, pattern = "matrix.mtx.gz")
+sample_prefixes <- gsub("_matrix.mtx.gz$", "", all_matrix_files)
+seurat_list <- list()
+
+for (prefix in sample_prefixes) {
+  mat_file <- file.path(data_dir, paste0(prefix, "_matrix.mtx.gz"))
+  feat_file <- file.path(data_dir, paste0(prefix, "_genes.tsv.gz")) 
+  bar_file <- file.path(data_dir, paste0(prefix, "_barcodes.tsv.gz"))
+  
+  counts <- ReadMtx(mtx = mat_file, features = feat_file, cells = bar_file)
+  seu <- CreateSeuratObject(counts = counts, project = prefix, min.cells = 3, min.features = 200)
+  seu$GSM_ID <- str_extract(prefix, "^GSM\\d+") 
+  seurat_list[[prefix]] <- seu
+}
+
+seu_315534_all <- merge(x = seurat_list[[1]], y = seurat_list[-1], add.cell.ids = names(seurat_list), project = "GSE315534")
+rm(seurat_list, counts, seu); gc()
+
+# --- 3. ---
+seu_315534_all$Dataset <- "GSE315534"
+seu_315534_all$Treatment <- "Treatment-naive"
+seu_315534_all$Tissue_Type <- "Primary_Tumor"
+
+match_idx <- match(seu_315534_all$GSM_ID, clinical_info_315534$GSM_ID)
+seu_315534_all$Gender <- clinical_info_315534$Gender[match_idx]
+seu_315534_all$Age <- clinical_info_315534$Age[match_idx]
+seu_315534_all$TNM_Stage <- clinical_info_315534$TNM_Stage[match_idx]
+seu_315534_all$Stage_AJCC <- clinical_info_315534$Stage_AJCC[match_idx]
+seu_315534_all$Histology <- clinical_info_315534$Histology[match_idx]
+seu_315534_all$Location <- clinical_info_315534$Location[match_idx]
+seu_315534_all$MSI_Status <- clinical_info_315534$MSI_Status[match_idx]
+
+############################################################################
+##GSE132465
+library(Seurat)
+library(stringr)
+library(data.table) 
+
+# --- 1.  ---
+clinical_info_132465 <- data.frame(
+                                   GSM_ID = c("GSM3868425","GSM3868426","GSM3868428","GSM3868429","GSM3868431","GSM3868432","GSM3868433","GSM3868435","GSM3868436","GSM3868437","GSM3868438","GSM3868440","GSM3868441","GSM3868443","GSM3868444","GSM3868445","GSM3868447"),
+                                   Gender = c("Female","Male","Male","Female","Female","Male","Male","Female","Male","Male","Male","Female","Female","Male","Male","Female","Female"),
+                                   Age = c(64,66,69,58,67,68,75,38,77,56,59,63,80,51,76,67,57),
+                                   TNM_Stage = c("T3N0M0","T3N1bM0","T3N1bM0","T3N0M0","T2N0M0","T3N1bM0","T3N0M0","T2N1aM0","T4aN1bM0","T3N0M0","T4aN1bM0","T3N0M0","T3N1M0","T3N1M1a","T3N1bM0","T3N1bM0","T3N2bM1a"),
+                                   Stage_AJCC = c("II","III","III","II","I","III","II","III","III","II","III","II","III","IV","III","III","IV"),
+                                   Histology = rep("Adenocarcinoma", 17),
+                                   Location = c("Rectum","Rectum","Sigmoid colon","Ascending colon","Ascending colon","Sigmoid colon","Sigmoid colon","Sigmoid colon","Rectosigmoid colon","Sigmoid colon","Ascending colon","Sigmoid colon","Ascending colon","Rectum","Sigmoid colon","Ascending colon","Sigmoid colon"),
+                                   MSI_Status = rep("MSS", 17)
+                                   )
+# --- 2.  ---
+id_mapping <- data.frame(
+                         GSM_ID = c("GSM3868425","GSM3868426","GSM3868428","GSM3868429","GSM3868431","GSM3868432","GSM3868433","GSM3868435","GSM3868436","GSM3868437","GSM3868438","GSM3868440","GSM3868441","GSM3868443","GSM3868444","GSM3868445","GSM3868447"),
+                         Sample_ID = c("SMC01-T","SMC02-T","SMC04-T","SMC05-T","SMC07-T","SMC08-T","SMC09-T","SMC11-T","SMC14-T","SMC15-T","SMC16-T","SMC18-T","SMC19-T","SMC21-T","SMC22-T","SMC23-T","SMC25-T")
+                        )
+data_dir <- "scRNA_ext_val/GSE132465_use/"
+# --- 3. ---
+anno_file <- paste0(data_dir, "GSE132465_CRC_10X_cell_annotation.txt.gz")
+anno_df <- fread(anno_file, data.table = FALSE)
+rownames(anno_df) <- anno_df$Index 
+
+target_samples <- id_mapping$Sample_ID
+anno_df_subset <- anno_df[anno_df$Sample %in% target_samples, ]
+match_id <- match(anno_df_subset$Sample, id_mapping$Sample_ID)
+anno_df_subset$GSM_ID <- id_mapping$GSM_ID[match_id]
+
+counts_file <- paste0(data_dir, "GSE132465_CRC_10X_raw_UMI_count_matrix.txt.gz")
+counts_df <- fread(counts_file, data.table = FALSE)
+rownames(counts_df) <- counts_df$Index
+counts_df <- counts_df[, -1]
+
+target_cells <- rownames(anno_df_subset)
+target_cells <- intersect(target_cells, colnames(counts_df)) # 确保细胞名匹配
+counts_df_subset <- counts_df[, target_cells]
+rm(counts_df); gc() 
+seu_132465_clean <- CreateSeuratObject(counts = counts_df_subset, project = "GSE132465", min.cells = 3, min.features = 200)
+
+seu_132465_clean <- AddMetaData(seu_132465_clean, metadata = anno_df_subset)
+rm(counts_df_subset, anno_df, anno_df_subset); gc()
+
+seu_132465_clean$Dataset <- "GSE132465"
+seu_132465_clean$Treatment <- "Treatment-naive"
+seu_132465_clean$Tissue_Type <- "Primary_Tumor"
+match_idx <- match(seu_132465_clean$GSM_ID, clinical_info_132465$GSM_ID)
+
+seu_132465_clean$Gender <- clinical_info_132465$Gender[match_idx]
+seu_132465_clean$Age <- clinical_info_132465$Age[match_idx]
+seu_132465_clean$TNM_Stage <- clinical_info_132465$TNM_Stage[match_idx]
+seu_132465_clean$Stage_AJCC <- clinical_info_132465$Stage_AJCC[match_idx]
+seu_132465_clean$Histology <- clinical_info_132465$Histology[match_idx]
+seu_132465_clean$Location <- clinical_info_132465$Location[match_idx]
+seu_132465_clean$MSI_Status <- clinical_info_132465$MSI_Status[match_idx]
+################################################################################
+library(Seurat)
+library(ggplot2)
+library(DoubletFinder) 
+Run_Strict_QC_Pipeline <- function(seu_obj, dataset_name) {  
+                                                          seu_obj[["percent.mt"]] <- PercentageFeatureSet(seu_obj, pattern = "^MT-")
+                                                          seu_obj[["percent.hb"]] <- PercentageFeatureSet(seu_obj, pattern = "^HB[^(P)]") 
+                                                          seu_obj[["percent.ribo"]] <- PercentageFeatureSet(seu_obj, pattern = "^RP[SL]")
+p_qc <- VlnPlot(seu_obj, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.ribo", "percent.hb"), ncol = 5, pt.size = 0, group.by = "GSM_ID") 
+p_qc_modified <- p_qc & scale_y_continuous(breaks = scales::pretty_breaks(n = 12)) & theme(panel.grid.major.y = element_line(color = "grey80", linetype = "dashed")) 
+print(p_qc_modified) 
+  
+pdf_name <- paste0("QC_VlnPlot_BeforeFilter_", dataset_name, ".pdf")
+ggsave(pdf_name, plot = p_qc_modified, width = 18, height = 5)
+seu_filtered <- subset(seu_obj, subset = nFeature_RNA > 200 & nFeature_RNA < 6000 & percent.mt < 25 & percent.hb < 1)
+sce_list <- SplitObject(seu_filtered, split.by = "GSM_ID")
+for (i in 1:length(sce_list)) {
+                              obj <- sce_list[[i]]
+                              obj <- NormalizeData(obj, verbose = FALSE)
+                              obj <- FindVariableFeatures(obj, verbose = FALSE)
+                              obj <- ScaleData(obj, verbose = FALSE)
+                              obj <- RunPCA(obj, verbose = FALSE)
+                              obj <- RunUMAP(obj, dims = 1:15, verbose = FALSE)
+                              obj <- FindNeighbors(obj, dims = 1:15, verbose = FALSE)
+                              obj <- FindClusters(obj, resolution = 0.5, verbose = FALSE)
+    
+                              sweep.res <- paramSweep(obj, PCs = 1:15, sct = FALSE)
+                              sweep.stats <- summarizeSweep(sweep.res, GT = FALSE)
+                              bcmvn <- find.pK(sweep.stats)
+                              optimal_pK <- as.numeric(as.character(bcmvn$pK[which.max(bcmvn$BCmetric)]))
+
+                              nExp_poi <- round(ncol(obj) * 8e-6 * ncol(obj)) 
+                              homotypic.prop <- modelHomotypic(obj@meta.data$seurat_clusters)
+                              nExp_poi.adj <- round(nExp_poi * (1 - homotypic.prop))
+    
+                              obj <- doubletFinder(obj, PCs = 1:15, pN = 0.25, pK = optimal_pK, nExp = nExp_poi.adj, sct = FALSE)
+                              df_col <- colnames(obj@meta.data)[grepl("DF.classifications", colnames(obj@meta.data))]
+                              obj$Doublet_Singlet <- obj@meta.data[[df_col]]
+                              obj@meta.data <- obj@meta.data[, !grepl("^DF.classifications|^pANN", colnames(obj@meta.data))]
+                              sce_list[[i]] <- obj
+                              } 
+seu_clean <- merge(sce_list[[1]], y = sce_list[-1])
+print(table(seu_clean$Doublet_Singlet))
+seu_clean <- subset(seu_clean, subset = Doublet_Singlet == "Singlet")  
+seu_clean$Doublet_Singlet <- NULL 
+gc()
+return(seu_clean)
+}
+
+seu_178318_clean <- Run_Strict_QC_Pipeline(seu_obj = seu_178318_clean, dataset_name = "GSE178318")
+seu_245552_clean <- Run_Strict_QC_Pipeline(seu_obj = seu_245552_clean, dataset_name = "GSE245552")
+seu_294300_clean <- Run_Strict_QC_Pipeline(seu_obj = seu_294300_all, dataset_name = "GSE294300")
+seu_315534_clean <- Run_Strict_QC_Pipeline(seu_obj = seu_315534_all, dataset_name = "GSE315534")
+seu_132465_clean <- Run_Strict_QC_Pipeline(seu_obj = seu_132465_clean, dataset_name = "GSE132465")
+################################################################################
+get_sample_details <- function(seu_obj, dataset_name) {
+                                                       meta <- seu_obj@meta.data
+                                                       sample_ids <- unique(meta$GSM_ID)
+                                                       result_df <- data.frame()
+for (id in sample_ids) {
+                       sub_meta <- meta[meta$GSM_ID == id, ]
+                       tmp_df <- data.frame(
+                                            Dataset = dataset_name,
+                                            GSM_ID = id,
+                                            TNM_Stage = unique(sub_meta$TNM_Stage)[1],     
+                                            Stage_AJCC = unique(sub_meta$Stage_AJCC)[1],
+                                            Cell_Count = nrow(sub_meta),                  
+                                            Median_Genes = median(sub_meta$nFeature_RNA),  
+                                            Median_UMIs = median(sub_meta$nCount_RNA)    
+                                            )
+                       result_df <- rbind(result_df, tmp_df)
+                       }  
+return(result_df)
+}
+
+report_178318 <- get_sample_details(seu_178318_clean, "GSE178318")
+report_245552 <- get_sample_details(seu_245552_clean, "GSE245552")
+report_294300 <- get_sample_details(seu_294300_clean,   "GSE294300")
+report_315534 <- get_sample_details(seu_315534_clean,   "GSE315534")
+report_132465 <- get_sample_details(seu_132465_clean, "GSE132465")
+
+All_Samples_Report <- rbind(report_178318, report_245552, report_294300, report_315534, report_132465)
+All_Samples_Report <- All_Samples_Report[order(All_Samples_Report$Dataset, -All_Samples_Report$Cell_Count), ]
+print(head(All_Samples_Report, 10))
+output_path <- "scRNA_ext_val/All_Samples_scRNA_QC_Report.csv"
+write.csv(All_Samples_Report, file = output_path, row.names = FALSE)
+###################################################################
+library(harmony)
+library(ggplot2)
+
+CRC_Mega <- merge(x = seu_178318_clean, 
+                  y = c(seu_245552_clean, seu_294300_clean, seu_315534_clean, seu_132465_clean),
+                  add.cell.ids = c("178318", "245552", "294300", "315534", "132465"),
+                  project = "CRC_Mega")
+if (grepl("^5", packageVersion("Seurat"))) {
+                                           CRC_Mega <- JoinLayers(CRC_Mega)
+                                           }
+rm(seu_178318_clean, seu_245552_clean, seu_294300_clean, seu_315534_clean, seu_132465_clean)
+gc()
+
+CRC_Mega <- NormalizeData(CRC_Mega)
+CRC_Mega <- FindVariableFeatures(CRC_Mega, selection.method = "vst", nfeatures = 2000)
+CRC_Mega <- ScaleData(CRC_Mega)
+CRC_Mega <- RunPCA(CRC_Mega, npcs = 30)
+CRC_Mega <- RunHarmony(CRC_Mega, group.by.vars = "Dataset")
+CRC_Mega <- RunUMAP(CRC_Mega, reduction = "harmony", dims = 1:30)
+CRC_Mega <- FindNeighbors(CRC_Mega, reduction = "harmony", dims = 1:30)
+CRC_Mega <- FindClusters(CRC_Mega, resolution = 0.5)
+
+save_path <- "scRNA_ext_val/CRC_Mega_Harmony_Clustered.rds"
+saveRDS(CRC_Mega, file = save_path)
+
+##part2
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(tidyverse)
+library(broom)   
+library(DESeq2) 
+#remotes::install_github("immunogenomics/LISI")
+library(lisi)
+
+CRC_Mega <- readRDS("scRNA_ext_val/CRC_Mega_Harmony_Clustered.rds")
+DimPlot(CRC_Mega, reduction = "umap", group.by = "Dataset", pt.size = 0.2, raster = FALSE, shuffle = TRUE) + ggtitle("UMAP after Harmony Integration") + theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+DimPlot(CRC_Mega, reduction = "umap", group.by = "Stage_AJCC", pt.size = 0.2, raster = FALSE, shuffle = TRUE) + ggtitle("UMAP after Harmony Integration") + theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+DimPlot(CRC_Mega, reduction = "umap", label = TRUE, pt.size = 0.2, label.size = 5, raster = FALSE) + ggtitle("Clustering Results") + theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+Idents(CRC_Mega) <- "seurat_clusters"
+canonical_markers <- c("EPCAM", "KRT8", "KRT18",   # 上皮/肿瘤                                          
+                       "COL1A1", "COL1A2", "ACTA2", "DCN", "FAP","PDGFRA", 
+                       "PECAM1", "VWF",                                                                  
+                       "PTPRC",                                                                                  
+                       "CD3D", "CD3E",                                                                    
+                       "CD4",                                                                                    
+                       "CD8A","CD8B", "PRF1","NKG7","GZMB","IFNG",               
+                       "CD79A","MS4A1",                                                             
+                       "MZB1", "SDC1", "JCHAIN", "IGHA1", "IGHG1",                  
+                       "CD163","MRC1","C1QC",                                                    
+                       "TPSAB1", "CPA3", "KIT", "TPSB2",                                         
+                       "CSF3R", "FCGR3B", "S100A8", "S100A9", "CXCR2"         
+                      )       
+DotPlot(CRC_Mega, features = canonical_markers, scale = FALSE) + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + scale_color_gradient(low = "lightgrey", high = "red") + ggtitle("Absolute average expression across clusters")
+CRC_Mega <- JoinLayers(CRC_Mega)
+
+library(patchwork)
+features_list <- list(
+                     Epithelial = intersect(c("EPCAM", "KRT8", "KRT18"), rownames(CRC_Mega)),
+                     Fibroblast = intersect(c("COL1A1", "COL1A2",  "ACTA2", "DCN", "FAP","PDGFRA"), rownames(CRC_Mega)),
+                     Endothelial = intersect(c("PECAM1", "VWF"), rownames(CRC_Mega)),
+                     CD8T = intersect(c("CD8A","CD8B", "PRF1","NKG7","GZMB","IFNG"), rownames(CRC_Mega)),
+                     Bcell = intersect(c("CD79A", "MS4A1"), rownames(CRC_Mega)),
+                     Plasma = intersect(c("MZB1", "SDC1", "JCHAIN", "IGHA1", "IGHG1"), rownames(CRC_Mega)),
+                     CD4T = intersect(c("CD3D", "CD3E","CD4"), rownames(CRC_Mega)),
+                     Macrophage = intersect(c( "CD163", "MRC1", "C1QC"), rownames(CRC_Mega)),
+                     Mast = intersect(c( "TPSAB1", "CPA3", "KIT", "TPSB2"), rownames(CRC_Mega)),
+                     Neutrophils = intersect(c( "CSF3R", "FCGR3B", "S100A8", "S100A9", "CXCR2"), rownames(CRC_Mega))
+                     )
+
+CRC_Mega <- AddModuleScore(CRC_Mega, features = features_list, name = "Lineage_Score")
+FeaturePlot(CRC_Mega, features = c("Lineage_Score1", "Lineage_Score2", "Lineage_Score3", "Lineage_Score4", "Lineage_Score5", "Lineage_Score6", "Lineage_Score7", "Lineage_Score8", "Lineage_Score9", "Lineage_Score10"), ncol = 3, order = TRUE, pt.size = 0.2, raster = FALSE, min.cutoff = 0) + plot_annotation(title = "1: Epithelial cells, 2: Fibroblasts, 3:Endothelial cells, 4: CD8Tcells, 5: B cells, 6: Plasma cells, 7: CD4T cells, 8: Macrophages, 9: Mast cells, 10: Neutrophils")
+CRC_Mega$CellType <- as.character(CRC_Mega$seurat_clusters)
+
+CRC_Mega$CellType[CRC_Mega$CellType %in% c("3", "4", "17","19")] <- "Epithelial_cells"
+CRC_Mega$CellType[CRC_Mega$CellType %in% c("7","13","18","21")] <- "Fibroblasts"
+CRC_Mega$CellType[CRC_Mega$CellType %in% c("12")] <- "Endothelial_cells"
+CRC_Mega$CellType[CRC_Mega$CellType %in% c("1", "6")] <- "CD4T_cells"
+CRC_Mega$CellType[CRC_Mega$CellType %in% c("5","22")] <- "B_cells"
+CRC_Mega$CellType[CRC_Mega$CellType %in% c("2","11","20","23")] <- "Plasma_cells"
+CRC_Mega$CellType[CRC_Mega$CellType %in% c("10")] <- "Macrophages"
+CRC_Mega$CellType[CRC_Mega$CellType %in% c("0","14")] <- "CD8T_cells"
+CRC_Mega$CellType[CRC_Mega$CellType %in% c("8","9")] <- "Neutrophils"
+CRC_Mega$CellType[CRC_Mega$CellType %in% c("15")] <- "Mast_cells"
+CRC_Mega$CellType[CRC_Mega$seurat_clusters %in% c("16")] <- "Unassigned"
+
+save_path_annotated <- "scRNA_ext_val/CRC_Mega_Harmony_Clustered_Annotated.rds"
+saveRDS(CRC_Mega, file = save_path_annotated)
+
+DimPlot(CRC_Mega, group.by = "CellType", label = TRUE, label.size = 4, pt.size = 0.2, raster = FALSE, shuffle = TRUE) + 
+        scale_color_manual(values = c("Epithelial_cells" = "#E64B35", 
+                                      "CD4T_cells"   = "#4DBBD5", 
+                                      "Fibroblasts"  = "#F39B7F", 
+                                      "Endothelial_cells" = "#8491B4", 
+                                      "B_cells"      = "#00A087", 
+                                      "Macrophages"  = "#0033FF",
+                                      "CD8T_cells"   = "#91D1C2",
+                                      "Neutrophils"  =  "#FF9900",
+                                      "Mast_cells"   =  "#FFFF00",
+                                      "Plasma_cells" = "#BA55D3",
+                                      "Unassigned"   = "#CCCCCC")) + ggtitle("Major Cell Types in CRC Microenvironment") + theme_classic()
+
+cell_order <- c("Epithelial_cells", "Fibroblasts", "Endothelial_cells","CD4T_cells", "CD8T_cells", "B_cells", "Plasma_cells", "Macrophages", "Neutrophils", "Mast_cells","Unassigned")
+CRC_Mega$CellType <- factor(CRC_Mega$CellType, levels = rev(cell_order))
+Idents(CRC_Mega) <- "CellType"
+p_dot <- DotPlot(CRC_Mega, features = canonical_markers, 
+                 scale = TRUE,    
+                 cluster.idents = FALSE) + 
+                 theme_bw() + 
+                 theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, face = "italic", color = "black", size = 11),
+                 axis.text.y = element_text(face = "bold", color = "black", size = 12),
+                 panel.grid.major = element_line(color = "grey95"), 
+                 panel.grid.minor = element_blank(),
+                 panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
+                 legend.position = "right" ) +
+                 scale_color_gradientn(colors = c("#313695", "#FFFFBF", "#A50026")) + 
+                 labs(x = "Canonical Markers", y = "", title = "Cell Type Annotation Validation")
+print(p_dot)
+
+CRC_Mega <- ScaleData(CRC_Mega, features = canonical_markers)
+set.seed(123)
+CRC_subset <- subset(CRC_Mega, downsample = 200)
+CRC_subset$CellType <- factor(CRC_subset$CellType, levels = cell_order)
+Idents(CRC_subset) <- "CellType"
+p_heatmap <- DoHeatmap(CRC_subset, 
+                       features = canonical_markers, 
+                       size = 4,                 
+                       angle = 45,                
+                       group.bar = TRUE,         
+                       label = TRUE,
+                       draw.lines = TRUE,         
+                       lines.width = 30) + 
+                       scale_fill_gradientn(colors = c("#313695", "white", "#A50026"), 
+                       na.value = "white",
+                       limits = c(-2.5, 2.5)) +   
+                       theme(
+                             axis.text.y = element_text(face = "italic", size = 10, color = "black"),
+                             legend.position = "right"
+                            )
+print(p_heatmap)
+
+## LISI/iLISI
+set.seed(42)
+if (ncol(CRC_Mega) > 20000) {
+                            sampled_cells <- sample(colnames(CRC_Mega), 20000)
+                            } 
+else {
+     sampled_cells <- colnames(CRC_Mega)
+     }
+
+embeddings_harmony <- Embeddings(CRC_Mega, reduction = "harmony")[sampled_cells, ]
+meta_data_lisi <- CRC_Mega@meta.data[sampled_cells, c("Dataset", "CellType")]
+lisi_res <- compute_lisi(embeddings_harmony, meta_data_lisi, c("Dataset", "CellType"))
+colnames(lisi_res) <- c("iLISI_Batch", "cLISI_CellType")
+lisi_res$CellType <- meta_data_lisi$CellType
+
+# 1. 
+p_ilisi <- ggplot(lisi_res, aes(x = "All Cells", y = iLISI_Batch)) +
+                  geom_violin(fill = "#4DBBD5", color = "black", alpha = 0.7) +
+                  geom_boxplot(width = 0.2, fill = "white", outlier.shape = NA) +
+                  theme_classic() +
+                  labs(title = "iLISI (Batch Mixing)", y = "iLISI Score (Closer to 5 is better)", x = "") +
+                  geom_hline(yintercept = 5, linetype = "dashed", color = "red") 
+# 2. 
+p_clisi <- ggplot(lisi_res %>% filter(CellType != "Unassigned"), aes(x = CellType, y = cLISI_CellType, fill = CellType)) +
+                  geom_violin(color = "black", alpha = 0.7) +
+                  geom_boxplot(width = 0.2, fill = "white", outlier.shape = NA) +
+                  theme_classic() +
+                  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
+                  labs(title = "cLISI (Cell Type Separation)", y = "cLISI Score (Closer to 1 is better)", x = "") +
+                  geom_hline(yintercept = 1, linetype = "dashed", color = "red") 
+
+p_lisi_combined <- p_ilisi + p_clisi + plot_layout(widths = c(1, 3))
+print(p_lisi_combined)
+
+Idents(CRC_Mega) <- "CellType" 
+epi_CRC_Mega <- subset(CRC_Mega, idents = "Epithelial_cells") 
+DefaultAssay(epi_CRC_Mega) <- "RNA"
+epi_CRC_Mega <- JoinLayers(epi_CRC_Mega) 
+epi_CRC_Mega$Stage <- factor(epi_CRC_Mega$Stage_AJCC, levels = c("III", "IV"))
+p_epi_patient <- DimPlot(epi_CRC_Mega, group.by = "Dataset", reduction = "umap") 
+print (p_epi_patient)
+
+t4_CRC_Mega <- subset(CRC_Mega, idents = "CD4T_cells")      
+DefaultAssay(t4_CRC_Mega) <- "RNA"
+t4_CRC_Mega <- JoinLayers(t4_CRC_Mega)
+t4_CRC_Mega$Stage <- factor(t4_CRC_Mega$Stage_AJCC, levels = c("III", "IV"))
+p_t4_patient <- DimPlot(t4_CRC_Mega, group.by = "Dataset", reduction = "umap") 
+
+t8_CRC_Mega <- subset(CRC_Mega, idents = "CD8T_cells")         
+DefaultAssay(t8_CRC_Mega) <- "RNA"
+t8_CRC_Mega <- JoinLayers(t8_CRC_Mega)
+t8_CRC_Mega$Stage <- factor(t8_CRC_Mega$Stage_AJCC, levels = c("III", "IV"))
+p_t8_patient <- DimPlot(t8_CRC_Mega, group.by = "Dataset", reduction = "umap") 
+
+macro_CRC_Mega <- subset(CRC_Mega, idents = "Macrophages")
+DefaultAssay(macro_CRC_Mega) <- "RNA"
+macro_CRC_Mega <- JoinLayers(macro_CRC_Mega)
+macro_CRC_Mega$Stage <- factor(macro_CRC_Mega$Stage_AJCC, levels = c("III", "IV"))
+p_macro_patient <- DimPlot(macro_CRC_Mega, group.by = "Dataset", reduction = "umap")
+
+endo_CRC_Mega <- subset(CRC_Mega, idents = "Endothelial_cells")
+DefaultAssay(endo_CRC_Mega) <- "RNA"
+endo_CRC_Mega <- JoinLayers(endo_CRC_Mega)
+endo_CRC_Mega$Stage <- factor(endo_CRC_Mega$Stage_AJCC, levels = c("III", "IV"))
+p_endo_patient <- DimPlot(endo_CRC_Mega, group.by = "Dataset", reduction = "umap") 
+
+fibro_CRC_Mega <- subset(CRC_Mega, idents = "Fibroblasts")
+DefaultAssay(fibro_CRC_Mega) <- "RNA"
+fibro_CRC_Mega <- JoinLayers(fibro_CRC_Mega)
+fibro_CRC_Mega$Stage <- factor(fibro_CRC_Mega$Stage_AJCC, levels = c("III", "IV"))
+p_fibro_patient <- DimPlot(fibro_CRC_Mega, group.by = "Dataset", reduction = "umap") 
+
+##marker 
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(tidyverse)
+
+Idents(CRC_Mega) <- "CellType"
+target_genes <- c("CEACAM5", "MUC16", "GGT1", "GOT1", "GOT2","HSP90AA1")
+valid_genes_all <- intersect(target_genes, rownames(CRC_Mega))
+
+desired_cell_order <- c("Epithelial_cells", "Fibroblasts", "Endothelial_cells", "B_cells", "Plasma_cells","CD4T_cells", "CD8T_cells", "Macrophages", "Neutrophils", "Mast_cells","Unassigned")
+Idents(CRC_Mega) <- factor(Idents(CRC_Mega), levels = desired_cell_order)
+target_genes_ordered <- c("CEACAM5", "MUC16", "GGT1", "GOT1", "GOT2", "HSP90AA1")
+valid_genes_ordered <- intersect(target_genes_ordered, rownames(CRC_Mega))
+p_cellpress_dot <- DotPlot(CRC_Mega, features = valid_genes_ordered, dot.scale = 7) + 
+                           coord_flip() + scale_color_gradient2(low = "#313695", mid = "#FFFFBF", high = "#A50026", midpoint = 0) +
+                           theme_bw() + 
+                           theme(axis.text.x = element_text(angle = 45, hjust = 1, face = "bold", size = 12, color = "black"),
+                                 axis.text.y = element_text(face = "italic", size = 12, color = "black"),
+                                 axis.title = element_text(face = "bold", size = 14),
+                                 legend.position = "right", legend.title = element_text(face = "bold", size = 10), legend.text = element_text(size = 9),
+                                 panel.grid.major = element_blank(),
+                                 panel.grid.minor = element_blank(),
+                                 panel.border = element_rect(color = "black", fill = NA, linewidth = 1.2),
+                                 axis.line = element_blank()) +
+                                 labs(x = "Cell Types in Tumor Microenvironment", y = "Target Genes", 
+                                 color = "Average\nExpression", size = "Percent\nExpressed") +
+                                 geom_hline(yintercept = 5.5, linetype = "dashed", color = "grey50", linewidth = 0.8)
+print(p_cellpress_dot)
+
+p_feature <- FeaturePlot(CRC_Mega, features = valid_genes_all, ncol = 3, pt.size = 0.1, raster = FALSE, order = TRUE)
+print(p_feature)
+
+## epethilial cells and T cells
+Epi_CRC <- subset(CRC_Mega, idents = "Epithelial_cells")
+Epi_subset <- subset(Epi_CRC, subset = Stage_AJCC %in% c("I", "II", "III", "IV"))
+
+Epi_subset$Stage_Group <- ifelse(Epi_subset$Stage_AJCC %in% c("I", "II", "III"), "I-III", "IV")
+Idents(Epi_subset) <- "Stage_Group"
+target_epi_genes <- c("CEACAM5", "MUC16", "GGT1", "GOT1", "GOT2","HSP90AA1")
+res_sc_epi <- FindMarkers(Epi_subset, 
+                          ident.1 = "IV", ident.2 = "I-III", 
+                          features = target_epi_genes,
+                          logfc.threshold = -Inf, 
+                          min.pct = 0, 
+                          test.use = "LR",                 
+                          latent.vars = "Dataset") %>%  
+                          rownames_to_column("Gene") %>% 
+                          mutate(CellType = "Epithelial_cells")
+
+
+## T cells (CD4T & CD8T) 
+T_CRC <- subset(CRC_Mega, idents = c("CD4T_cells", "CD8T_cells"))
+T_subset <- subset(T_CRC, subset = Stage_AJCC %in% c("I", "II", "III", "IV"))
+T_subset$Stage_Group <- ifelse(T_subset$Stage_AJCC %in% c("I", "II", "III"), "I-III", "IV")
+Idents(T_subset) <- "Stage_Group"
+
+target_T_genes <- c("HSP90AA1")
+res_sc_T <- FindMarkers(T_subset, 
+                        ident.1 = "IV", ident.2 = "I-III", 
+                        features = target_T_genes,
+                        logfc.threshold = -Inf, 
+                        min.pct = 0, 
+                        test.use = "LR",                 
+                        latent.vars = "Dataset") %>%  
+                        rownames_to_column("Gene") %>% 
+                        mutate(CellType = "T_cells")
+
+final_res_sc <- bind_rows(res_sc_epi, res_sc_T)
+final_res_sc <- final_res_sc %>% mutate(p_val_adj = replace_na(p_val_adj, 1),P_value_text = ifelse(p_val_adj < 0.001, sprintf("P = %.2e", p_val_adj),sprintf("P = %.3f", p_val_adj)))
+gene_order <- rev(c("CEACAM5", "MUC16", "GGT1", "GOT1", "GOT2", "HSP90AA1"))
+final_res_sc$Gene <- factor(final_res_sc$Gene, levels = gene_order)
+
+p_sc_lfc <- ggplot(final_res_sc, aes(x = avg_log2FC, y = Gene)) +
+                   geom_vline(xintercept = 0, linetype = "dashed", color = "grey50", linewidth = 0.8) +
+                   geom_segment(aes(x = 0, xend = avg_log2FC, y = Gene, yend = Gene, color = CellType), linewidth = 1.2) +
+                   geom_point(aes(fill = CellType), shape = 21, color = "black", size = 5, stroke = 1) +
+                   geom_text(aes(label = P_value_text,x = avg_log2FC + ifelse(avg_log2FC > 0, 0.05, -0.05), hjust = ifelse(avg_log2FC > 0, 0, 1)),vjust = 0.5, size = 4, fontface = "italic", color = "grey20") +
+                   scale_fill_manual(values = c("Epithelial_cells" = "#B2182B", "T_cells" = "#2166AC")) +
+                   scale_color_manual(values = c("Epithelial_cells" = "#B2182B", "T_cells" = "#2166AC")) +
+                   scale_x_continuous(expand = expansion(mult = c(0.4, 0.4))) +
+                   theme_bw() +
+                   theme(
+                         axis.text.y = element_text(face = "italic", size = 13, color = "black"),
+                         axis.text.x = element_text(size = 12, color = "black"),
+                         axis.title.x = element_text(face = "bold", size = 13),
+                         panel.grid.minor = element_blank(),
+                         panel.grid.major.y = element_blank(), 
+                         panel.border = element_rect(color = "black", fill = NA, linewidth = 1.2),
+                         legend.position = "bottom",
+                         legend.title = element_blank(),
+                         legend.text = element_text(size = 11, face = "bold")
+                         ) +
+                  labs(x = "Average Log2 Fold Change (Stage IV vs III)",y = "", title = "Gene expression shift in tumor vs. immune compartment",subtitle = "Tested via Logistic Regression adjusting for Dataset batch")
+print(p_sc_lfc)
+
+##  epethilial cells   macrophage  fibroblasts (Net & Ratios)
+DefaultAssay(CRC_Mega) <- "RNA"
+metab_pathways <- list(
+                       C5DC_Production    = c("AASS", "AADAT", "GCDH", "DHTKD1"),                     
+                       BUN_Generation     = c("ARG1","ARG2"),
+                       CA19_9_Synthesis   = c("FUT3", "B3GALT5", "ST3GAL3", "ST3GAL4")
+                       )
+
+metab_pathways_filtered <- lapply(metab_pathways, function(x) intersect(x, rownames(CRC_Mega)))
+metab_pathways_filtered <- metab_pathways_filtered[sapply(metab_pathways_filtered, length) > 0]
+real_names <- names(metab_pathways_filtered)
+
+cols_to_clear <- c(real_names, paste0(real_names, "_Score"), paste0("MetabScore_", 1:3))
+CRC_Mega@meta.data <- CRC_Mega@meta.data[, !(colnames(CRC_Mega@meta.data) %in% cols_to_clear)]
+CRC_Mega <- AddModuleScore(CRC_Mega, features = metab_pathways_filtered, ctrl = 5 , name = "MetabScore_")
+safe_names <- gsub("_", ".", real_names)
+for(i in seq_along(real_names)) {
+                                 old_col <- paste0("MetabScore_", i)
+                                 colnames(CRC_Mega@meta.data)[colnames(CRC_Mega@meta.data) == old_col] <- safe_names[i]
+                                }
+
+score_matrix <- t(CRC_Mega@meta.data[, safe_names, drop = FALSE])
+CRC_Mega[["Metab"]] <- CreateAssayObject(counts = score_matrix)
+target_cells <- c("Epithelial_cells", "Fibroblasts", "Endothelial_cells", "B_cells", "Plasma_cells", "CD4T_cells", "CD8T_cells", "Macrophages", "Neutrophils", "Mast_cells", "Unassigned")
+target_cells <- intersect(target_cells, unique(CRC_Mega$CellType))
+
+CRC_Subset <- subset(CRC_Mega, subset = CellType %in% target_cells)
+CRC_Subset$CellType <- factor(CRC_Subset$CellType, levels = target_cells)
+
+DefaultAssay(CRC_Subset) <- "Metab"
+p_cellpress_dot <- DotPlot(CRC_Subset, features = rev(safe_names), group.by = "CellType", dot.scale = 7) + 
+                           coord_flip() + 
+                           scale_color_gradient2(low = "#313695", mid = "#FFFFBF", high = "#A50026", midpoint = 0) +  
+                           theme_bw() + 
+                           theme(
+                                 axis.text.x = element_text(angle = 45, hjust = 1, face = "bold", size = 12, color = "black"),
+                                 axis.text.y = element_text(face = "bold", size = 12, color = "black"),
+                                 axis.title = element_text(face = "bold", size = 14),
+                                 legend.position = "right", 
+                                 panel.grid.major = element_blank(),
+                                 panel.grid.minor = element_blank(),
+                                 panel.border = element_rect(color = "black", fill = NA, linewidth = 1.2)) +
+                           labs(x = "Cell Types in Tumor Microenvironment", y = "Metabolic Programs", color = "Average\nScore (Z-scaled)")
+
+analysis_grid <- data.frame(
+                            CellType = c(rep("Epithelial_cells", 3), "Fibroblasts"),
+                            Pathway = c("C5DC.Production", "BUN.Generation", "CA19.9.Synthesis", "C5DC.Production"),
+                            stringsAsFactors = FALSE
+                            )
+
+target_cells <- unique(analysis_grid$CellType)
+target_metrics <- unique(analysis_grid$Pathway)
+df_meta_sc <- CRC_Mega@meta.data %>% filter(CellType %in% target_cells & Stage_AJCC %in% c("I", "II", "III", "IV")) %>% mutate(Stage_Group = ifelse(Stage_AJCC %in% c("I", "II", "III"), "I-III", "IV"),
+              Stage_Group = factor(Stage_Group, levels = c("I-III", "IV"))) %>% dplyr::select(CellType, Stage_Group, Dataset, all_of(target_metrics))
+
+safe_scale <- function(x) {
+                           if (sd(x, na.rm = TRUE) == 0) return(rep(0, length(x)))
+                           return(scale(x)[, 1])
+                           }
+df_norm <- df_meta_sc %>% group_by(Dataset, CellType) %>% mutate(across(all_of(target_metrics), ~ safe_scale(.))) %>% ungroup()
+stats_list_wilcox <- list()
+for (i in 1:nrow(analysis_grid)) {
+                                  current_cell <- analysis_grid$CellType[i]
+                                  current_pathway <- analysis_grid$Pathway[i]
+                                  df_sub <- df_norm %>% filter(CellType == current_cell)
+                                  val_I_III <- df_sub[[current_pathway]][df_sub$Stage_Group == "I-III"]
+                                  val_IV    <- df_sub[[current_pathway]][df_sub$Stage_Group == "IV"]
+                                  val_I_III <- val_I_III[!is.na(val_I_III)]
+                                  val_IV    <- val_IV[!is.na(val_IV)]
+                                  if(length(val_I_III) < 3 | length(val_IV) < 3) next
+                                  p_val <- wilcox.test(val_I_III, val_IV)$p.value
+                                  mean_diff <- mean(val_IV) - mean(val_I_III)
+                                  se_diff <- sqrt(var(val_IV)/length(val_IV) + var(val_I_III)/length(val_I_III))
+  
+                                  stats_list_wilcox[[i]] <- data.frame(
+                                                                       CellType = current_cell,
+                                                                       Pathway = current_pathway,
+                                                                       Estimate = mean_diff,
+                                                                       Std_Error = se_diff,
+                                                                       p_val = p_val
+                                                                       )
+                                  }
+final_res <- do.call(rbind, stats_list_wilcox)
+
+final_res$p_val_adj <- p.adjust(final_res$p_val, method = "BH")
+final_res <- final_res %>% mutate(p_val_adj = replace_na(p_val_adj, 1), Trend = ifelse(Estimate > 0, "Up in Stage IV", "Down in Stage IV"),
+             Signif_Star = case_when(p_val_adj < 0.001 ~ "***",p_val_adj < 0.01 ~ "**",p_val_adj < 0.05 ~ "*",TRUE ~ "ns"), Clean_Cell = gsub("_", " ", CellType),
+             Clean_Pathway = gsub("\\.", " ", Pathway), Y_Label = paste0(Clean_Cell, " :\n", Clean_Pathway))
+
+final_res$Y_Label <- factor(final_res$Y_Label, levels = rev(final_res$Y_Label))
+max_se <- max(final_res$Std_Error, na.rm = TRUE)
+p_combined_forest <- ggplot(final_res, aes(x = Y_Label, y = Estimate, color = Trend)) +
+                            geom_hline(yintercept = 0, linetype = "dashed", color = "grey40", linewidth = 1) +
+                            geom_errorbar(aes(ymin = Estimate - Std_Error, ymax = Estimate + Std_Error), width = 0.2, linewidth = 1.2) +
+                            geom_point(size = 4) +
+                            geom_text(aes(label = Signif_Star,y = Estimate + sign(Estimate) * (Std_Error + max_se * 0.8)), size = 5, color = "black", fontface = "bold", vjust = 0.75) +
+                            coord_flip() +
+                            scale_color_manual(values = c("Up in Stage IV" = "#A50026", "Down in Stage IV" = "#313695")) +
+                            theme_bw() + 
+                            theme(axis.text.y = element_text(face = "bold", size = 11, color = "black", lineheight = 0.8),
+                                  axis.text.x = element_text(face = "bold", size = 11, color = "black"),
+                                  axis.title = element_text(face = "bold", size = 14),
+                                  legend.position = "right", 
+                                  legend.title = element_text(face = "bold", size = 11), 
+                                  legend.text = element_text(size = 10),
+                                  panel.grid.major.y = element_blank(),
+                                  panel.grid.minor = element_blank(),
+                                  panel.border = element_rect(color = "black", fill = NA, linewidth = 1.2)) +
+                           labs(x = "Cell Types & Metabolic Programs", y = "Effect Size (Stage IV vs I-III)\nBatch-Normalized Mean Shift ± SE", title = "Metabolic Shifts: Epithelial vs Plasma Cells", color = "Metabolic Shift")
+print(p_combined_forest)
+
+## CD8T cells 
+DefaultAssay(t8_CRC_Mega) <- "RNA"
+batch_col <- "Dataset" 
+metab_pathways <- list(
+                       Oxidative_stress = c("HMOX1", "SOD2", "TXN", "TXNIP", "NFE2L2", "CAT","GSR","PRDX1","PRDX2"),  
+                       Exhaustion       = c("PDCD1", "HAVCR2", "LAG3", "TIGIT", "CTLA4","TOX", "TOX2","ENTPD1", "CXCL13","LAYN"),  
+                       Tumor_Homing_Trm = c("CXCR3","CXCR6", "CCR5", "ITGAE", "SELL", "CXCL13")
+                       )
+final_metrics <- names(metab_pathways)
+
+cols_to_clear <- c(final_metrics, grep("^MetabScore_", colnames(t8_CRC_Mega@meta.data), value = TRUE))
+t8_CRC_Mega@meta.data <- t8_CRC_Mega@meta.data[, !(colnames(t8_CRC_Mega@meta.data) %in% cols_to_clear)]
+
+metab_pathways_filtered <- lapply(metab_pathways, function(x) unique(intersect(x, rownames(t8_CRC_Mega))))
+empty_pathways <- names(metab_pathways_filtered)[sapply(metab_pathways_filtered, length) == 0]
+
+t8_CRC_Mega <- AddModuleScore(t8_CRC_Mega, features = metab_pathways_filtered, ctrl = 5, name = "MetabScore_")
+score_cols <- paste0("MetabScore_", seq_along(final_metrics))
+for(i in seq_along(final_metrics)){
+                                   colnames(t8_CRC_Mega@meta.data)[colnames(t8_CRC_Mega@meta.data) == score_cols[i]] <- final_metrics[i]
+                                   }
+
+df_meta <- t8_CRC_Mega@meta.data[, c("Stage", batch_col, final_metrics)]
+df_meta <- df_meta[!is.na(df_meta$Stage) & df_meta$Stage %in% c("I", "II", "III", "IV"), ]
+df_meta$Stage_Group <- ifelse(df_meta$Stage %in% c("I", "II", "III"), "I-III", "IV")
+df_meta$Stage_Group <- factor(df_meta$Stage_Group, levels = c("I-III", "IV"))
+
+safe_scale <- function(x) {
+                           if (sd(x, na.rm=TRUE) == 0) return(rep(0, length(x))) else return(scale(x)[,1])
+                          }
+df_norm <- df_meta %>% group_by(.data[[batch_col]]) %>% mutate(across(all_of(final_metrics), ~ safe_scale(.x))) %>% ungroup()
+stats_list <- list()
+for(metric in final_metrics){
+                             val_I_III <- df_norm[[metric]][df_norm$Stage_Group == "I-III"]
+                             val_IV    <- df_norm[[metric]][df_norm$Stage_Group == "IV"]
+                             val_I_III <- val_I_III[!is.na(val_I_III)]
+                             val_IV    <- val_IV[!is.na(val_IV)]
+                             if(length(val_I_III) < 3 | length(val_IV) < 3) next
+                             pval <- wilcox.test(x = val_I_III, y = val_IV)$p.value
+                             mean_I_III <- mean(val_I_III)
+                             mean_IV  <- mean(val_IV)
+                             estimate <- mean_IV - mean_I_III
+                             se <- sqrt(var(val_IV)/length(val_IV) + var(val_I_III)/length(val_I_III))
+                             trend <- ifelse(estimate > 0, "Up in Stage IV", "Down in Stage IV")
+                             stats_list[[metric]] <- data.frame(
+                                                                Pathway = metric, 
+                                                                Estimate = estimate,
+                                                                Std_Error = se,
+                                                                p_val_raw = pval, 
+                                                                Trend = trend,
+                                                                Mean_I_III = mean_I_III,
+                                                                Mean_IV = mean_IV
+                                                                )
+                             }
+final_res_tcell <- do.call(rbind, stats_list)
+final_res_tcell$p_val_adj <- p.adjust(final_res_tcell$p_val_raw, method = "BH") 
+final_res_tcell <- final_res_tcell %>% mutate(Signif_Star = case_when(p_val_adj < 0.001 ~ "***", p_val_adj < 0.01 ~ "**", p_val_adj < 0.05 ~ "*",TRUE ~ "ns"),Pathway_Clean = gsub("_", " ", Pathway))
+
+final_res_tcell$Pathway_Clean <- factor(final_res_tcell$Pathway_Clean, levels = rev(final_res_tcell$Pathway_Clean))
+print(final_res_tcell[, c("Pathway_Clean", "Estimate", "Std_Error", "p_val_adj", "Signif_Star")])
+
+max_se_t <- max(final_res_tcell$Std_Error, na.rm = TRUE)
+p_tcell_forest <- ggplot(final_res_tcell, aes(x = Pathway_Clean, y = Estimate, color = Trend)) +
+                         geom_hline(yintercept = 0, linetype = "dashed", color = "grey40", linewidth = 1) +
+                         geom_errorbar(aes(ymin = Estimate - Std_Error, ymax = Estimate + Std_Error),width = 0.2, linewidth = 1.2) +
+                         geom_point(size = 4) +
+                         geom_text(aes(label = Signif_Star, y = Estimate + sign(Estimate) * (Std_Error + max_se_t * 0.8)),size = 5, color = "black", fontface = "bold", vjust = 0.75) +
+                         coord_flip() +
+                         scale_color_manual(values = c("Up in Stage IV" = "#E64B35", "Down in Stage IV" = "#00A087")) + 
+                         theme_bw() + 
+                         theme(
+                               axis.text.y = element_text(face = "bold", size = 12, color = "black"),
+                               axis.text.x = element_text(face = "bold", size = 11, color = "black"),
+                               axis.title = element_text(face = "bold", size = 14),
+                               legend.position = "right", 
+                               legend.title = element_text(face = "bold", size = 11),
+                               panel.grid.major.y = element_blank(),
+                               panel.grid.minor = element_blank(),
+                               panel.border = element_rect(color = "black", fill = NA, linewidth = 1.2)) +
+                         labs(x = "T Cell Functional Modules", y = "Effect Size (Stage IV vs I-III)\nBatch-Normalized Mean Shift ± SE", title = "CD8+ T Cells Functional Shifts",color = "Functional Shift")
+print(p_tcell_forest)
+
+## CD4T cells 
+DefaultAssay(t4_CRC_Mega) <- "RNA"
+batch_col <- "Dataset" 
+metab_pathways <- list(
+                       Oxidative_stress  = c("HMOX1", "SOD2", "TXN", "TXNIP", "NFE2L2", "CAT","GSR","PRDX1","PRDX2"),  
+                       Treg_suppression  = c("FOXP3", "IL2RA", "CTLA4", "TIGIT", "BATF", "TNFRSF18", "IKZF2"),
+                       Tumor_Homing_Trm  = c("CXCR3","CXCR6", "CCR5", "ITGAE", "SELL", "CXCL13")
+                       )
+final_metrics <- names(metab_pathways)
+cols_to_clear <- c(final_metrics, grep("^MetabScore_", colnames(t4_CRC_Mega@meta.data), value = TRUE))
+t4_CRC_Mega@meta.data <- t4_CRC_Mega@meta.data[, !(colnames(t4_CRC_Mega@meta.data) %in% cols_to_clear)]
+
+metab_pathways_filtered <- lapply(metab_pathways, function(x) unique(intersect(x, rownames(t4_CRC_Mega))))
+t4_CRC_Mega <- AddModuleScore(t4_CRC_Mega, features = metab_pathways_filtered, ctrl = 5, name = "MetabScore_")
+
+score_cols <- paste0("MetabScore_", seq_along(final_metrics))
+for(i in seq_along(final_metrics)){
+                                   colnames(t4_CRC_Mega@meta.data)[colnames(t4_CRC_Mega@meta.data) == score_cols[i]] <- final_metrics[i]
+                                   }
+
+df_meta <- t4_CRC_Mega@meta.data[, c("Stage", batch_col, final_metrics)]
+df_meta <- df_meta[!is.na(df_meta$Stage) & df_meta$Stage %in% c("I", "II", "III", "IV"), ]
+df_meta$Stage_Group <- ifelse(df_meta$Stage %in% c("I", "II", "III"), "I-III", "IV")
+df_meta$Stage_Group <- factor(df_meta$Stage_Group, levels = c("I-III", "IV"))
+
+safe_scale <- function(x) {
+                           if (sd(x, na.rm=TRUE) == 0) return(rep(0, length(x))) else return(scale(x)[,1])
+                           }
+
+df_norm <- df_meta %>% group_by(.data[[batch_col]]) %>% mutate(across(all_of(final_metrics), ~ safe_scale(.x))) %>% ungroup()
+stats_list <- list()
+
+for(metric in final_metrics){
+                             val_I_III <- df_norm[[metric]][df_norm$Stage_Group == "I-III"]
+                             val_IV    <- df_norm[[metric]][df_norm$Stage_Group == "IV"]
+                             val_I_III <- val_I_III[!is.na(val_I_III)]
+                             val_IV    <- val_IV[!is.na(val_IV)]
+  
+                             if(length(val_I_III) < 3 | length(val_IV) < 3) next
+                             pval <- wilcox.test(x = val_I_III, y = val_IV)$p.value
+                             mean_I_III <- mean(val_I_III)
+                             mean_IV  <- mean(val_IV)  
+                             estimate <- mean_IV - mean_I_III
+                             se <- sqrt(var(val_IV)/length(val_IV) + var(val_I_III)/length(val_I_III))  
+                             trend <- ifelse(estimate > 0, "Up in Stage IV", "Down in Stage IV")
+                             stats_list[[metric]] <- data.frame(
+                                                                Pathway = metric, 
+                                                                Estimate = estimate,
+                                                                Std_Error = se,
+                                                                p_val_raw = pval, 
+                                                                Trend = trend,
+                                                                Mean_I_III = mean_I_III,
+                                                                Mean_IV = mean_IV
+                                                                )
+                             }
+final_res_tcell <- do.call(rbind, stats_list)
+final_res_tcell$p_val_adj <- p.adjust(final_res_tcell$p_val_raw, method = "BH") 
+
+final_res_tcell <- final_res_tcell %>% mutate(Signif_Star = case_when(p_val_adj < 0.001 ~ "***",p_val_adj < 0.01 ~ "**",p_val_adj < 0.05 ~ "*",TRUE ~ "ns"), Pathway_Clean = gsub("_", " ", Pathway))
+final_res_tcell$Pathway_Clean <- factor(final_res_tcell$Pathway_Clean, levels = rev(final_res_tcell$Pathway_Clean))
+print(final_res_tcell[, c("Pathway_Clean", "Estimate", "Std_Error", "p_val_adj", "Signif_Star")])
+
+max_se_t <- max(final_res_tcell$Std_Error, na.rm = TRUE)
+p_tcell_forest <- ggplot(final_res_tcell, aes(x = Pathway_Clean, y = Estimate, color = Trend)) +
+                         geom_hline(yintercept = 0, linetype = "dashed", color = "grey40", linewidth = 1) +
+                         geom_errorbar(aes(ymin = Estimate - Std_Error, ymax = Estimate + Std_Error), width = 0.2, linewidth = 1.2) +
+                         geom_point(size = 4) +
+                         geom_text(aes(label = Signif_Star, y = Estimate + sign(Estimate) * (Std_Error + max_se_t * 0.8)),size = 5, color = "black", fontface = "bold", vjust = 0.75) +
+                         coord_flip() +
+                         scale_color_manual(values = c("Up in Stage IV" = "#E64B35", "Down in Stage IV" = "#00A087")) + 
+                         theme_bw() + 
+                         theme(axis.text.y = element_text(face = "bold", size = 12, color = "black"),
+                               axis.text.x = element_text(face = "bold", size = 11, color = "black"),
+                               axis.title = element_text(face = "bold", size = 14),
+                               legend.position = "right", 
+                               legend.title = element_text(face = "bold", size = 11),
+                               panel.grid.major.y = element_blank(),
+                               panel.grid.minor = element_blank(),
+                               panel.border = element_rect(color = "black", fill = NA, linewidth = 1.2)) +
+                         labs(x = "T Cell Functional Modules", y = "Effect Size (Stage IV vs I-III)\nBatch-Normalized Mean Shift ± SE", title = "CD8+ T Cells Functional Shifts",color = "Functional Shift")
+print(p_tcell_forest)

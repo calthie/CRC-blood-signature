@@ -1,0 +1,1731 @@
+##Data Clean & Imputation
+if(!require(tidyverse)) install.packages("tidyverse")
+suppressPackageStartupMessages(library(tidyverse))
+df <- read.delim("well_organized_data", header = TRUE, sep = "\t", na.strings = c("", "NA", "NULL", " "),  stringsAsFactors = FALSE)
+clean_lod_symbols <- function(x) {
+                                  if (is.numeric(x)) return(x) 
+                                  x_str <- trimws(as.character(x)) 
+                                  x_no_na <- x_str[!is.na(x_str)]
+                                  if (length(x_no_na) == 0) return(as.numeric(x_str))                                
+                                  is_valid <- grepl("^([<>]?)[-+]?[0-9]*\\.?[0-9]+$", x_no_na)
+                                  if (all(is_valid)) {                                               
+                                                     is_less <- grepl("^<", x_str)
+                                                     num_val <- suppressWarnings(as.numeric(gsub("[<>]", "", x_str)))
+                                                     num_val[is_less & !is.na(is_less)] <- num_val[is_less & !is.na(is_less)] / 2   
+                                                     return(num_val)
+                                                     } 
+                                  else {                                                  
+                                       return(x)
+                                       }
+                                 }
+df_cleaned_symbols <- df %>% mutate(across(everything(), clean_lod_symbols))
+df_numeric_fixed <- df_cleaned_symbols %>% mutate(across(where(is.integer), as.numeric))
+missing_rate <- colMeans(is.na(df_numeric_fixed))
+cols_to_keep <- names(missing_rate[missing_rate <= 0.5])
+df_filtered <- df_numeric_fixed %>% dplyr::select(all_of(cols_to_keep))
+get_mode <- function(v) { uniqv <- unique(na.omit(v)); uniqv[which.max(tabulate(match(v, uniqv)))] }
+df_final <- df_filtered %>% mutate(
+                                   across(where(is.numeric), ~replace_na(., median(., na.rm = TRUE))),
+                                   across(where(is.character), ~replace_na(., get_mode(.)))
+                                   )
+write.table(df_final, "well_organized_data_cleaned.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+
+#=============
+#Figure S2
+#=============
+if(!require(VIM)) install.packages("VIM")
+if(!require(missForest)) install.packages("missForest")
+if(!require(pROC)) install.packages("pROC")
+if(!require(randomForest)) install.packages("randomForest")
+if(!require(ggplot2)) install.packages("ggplot2")
+if(!require(ggsci)) install.packages("ggsci")
+suppressPackageStartupMessages({
+                                library(VIM)
+                                library(missForest)
+                                library(randomForest)
+                                library(pROC)
+                                library(ggplot2)
+                                library(ggsci)
+                                })
+target_col <- "AJCC"       
+id_cols_to_remove <- c("Symbol")
+df_pre_impute <- df_filtered %>% 
+                 dplyr::select(-any_of(id_cols_to_remove)) %>% 
+                 filter(!is.na(.data[[target_col]])) %>% 
+                 mutate(across(where(is.character), as.factor))
+#strategy A: media/mode
+df_strategy_A <- df_final %>% 
+                               dplyr::select(-any_of(id_cols_to_remove)) %>%
+                               filter(!is.na(.data[[target_col]])) %>%
+                               mutate(across(where(is.character), as.factor))
+#strategy B: KNN 
+set.seed(123)
+df_strategy_B <- kNN(as.data.frame(df_pre_impute), k = 5, imp_var = FALSE) 
+#strategy C: missForest 
+set.seed(123)
+capture.output( rf_impute_result <- missForest(as.data.frame(df_pre_impute), maxiter = 5, ntree = 100) )
+df_strategy_C <- rf_impute_result$ximp
+
+evaluate_strategy <- function(data_imp) {
+                                         temp_data <- data_imp
+                                         temp_data$Target <- as.factor(ifelse(grepl("4", temp_data[[target_col]]), 1, 0))
+                                         cols_to_drop <- c("AJCC", "T", "N", "M","Tumor_site") 
+                                         temp_data <- temp_data %>% dplyr::select(-any_of(cols_to_drop))
+                                         set.seed(2026)
+                                         rf_model <- randomForest(Target ~ ., data = temp_data, ntree = 500, importance = TRUE)
+                                         oob_pred <- predict(rf_model, type = "prob")[, 2]
+                                         roc_obj <- pROC::roc(temp_data$Target, oob_pred, quiet = TRUE)
+                                         auc_val <- as.numeric(pROC::auc(roc_obj))  
+                                         imp <- importance(rf_model)
+                                         top_features <- rownames(imp)[order(imp[, "MeanDecreaseGini"], decreasing = TRUE)][1:10]
+                                         return(list(AUC = auc_val, TopFeatures = top_features,ROC = roc_obj))
+                                         }
+res_A <- evaluate_strategy(df_strategy_A)
+res_B <- evaluate_strategy(df_strategy_B)
+res_C <- evaluate_strategy(df_strategy_C)
+
+intersect_AB <- intersect(res_A$TopFeatures, res_B$TopFeatures)
+intersect_ABC <- intersect(intersect_AB, res_C$TopFeatures)
+##=========================================
+df_features <- data.frame(
+                          Rank = 1:10,
+                          `Strategy_A_Median` = res_A$TopFeatures,
+                          `Strategy_B_KNN` = res_B$TopFeatures,
+                          `Strategy_C_missForest` = res_C$TopFeatures
+                          )
+write.csv(df_features, "Sensitivity_Analysis_Top10_Features.csv", row.names = FALSE)
+roc_list <- list(
+                 "Strategy A: Median/Mode" = res_A$ROC,
+                 "Strategy B: KNN" = res_B$ROC,
+                 "Strategy C: missForest" = res_C$ROC
+                 )
+p_roc <- ggroc(roc_list, legacy.axes = TRUE, linewidth = 1) + theme_bw() + 
+               labs(title = "Sensitivity analysis of missing data imputation", subtitle = paste0("Outcome: stage IV vs. I-III (pure blood-based features)"),x = "1 - specificity", y = "Sensitivity", color = "Imputation strategy") + scale_color_npg() +
+               theme(legend.position = c(0.75, 0.2), legend.background = element_rect(fill = "transparent"),
+               text = element_text(size = 12), plot.title = element_text(face = "bold", size = 14)) +
+               geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color = "grey", linetype = "dashed")
+print(p_roc)
+#########################
+##Base
+#########################
+rm(list = ls())
+required_packages <- c("tidyverse", "caret","randomForest","xgboost","pROC","ggplot2","pheatmap","RColorBrewer","corrplot","reshape2","gridExtra","scales","ROCR","glmnet","e1071","mice","VIM","FactoMineR","factoextra","ComplexHeatmap","circlize","ggpubr", "rstatix","ggsci","patchwork")
+new_packages <- required_packages[!(required_packages %in% installed.packages()[,"Package"])]
+if(length(new_packages)) install.packages(new_packages)
+invisible(lapply(required_packages, library, character.only = TRUE))
+set.seed(42)
+theme_set(theme_bw(base_size = 12))
+options(scipen = 999) 
+
+data_raw <- read.delim("well_organized_data_cleaned.txt", header = TRUE, sep = "\t", stringsAsFactors = FALSE, encoding = "UTF-8")
+data_raw$AJCC_Main <- as.numeric(gsub("[abc]", "", data_raw$AJCC))
+data_raw$Stage_Three <- case_when(
+                                  data_raw$AJCC_Main %in% c(1, 2) ~ "Stage_I_II",
+                                  data_raw$AJCC_Main == 3 ~ "Stage_III",
+                                  data_raw$AJCC_Main == 4 ~ "Stage_IV",
+                                  TRUE ~ NA_character_
+                                 )
+data_raw$Stage_Three <- factor(data_raw$Stage_Three,  levels = c("Stage_I_II", "Stage_III", "Stage_IV"))
+data_raw$Stage_Binary <- case_when(
+                                   data_raw$AJCC_Main %in% c(1, 2, 3) ~ "Early",
+                                   data_raw$AJCC_Main == 4 ~ "Late",
+                                   TRUE ~ NA_character_
+                                   )
+data_raw$Stage_Binary <- factor(data_raw$Stage_Binary, levels = c("Early", "Late"))
+table_three <- table(data_raw$Stage_Three)
+table_binary <- table(data_raw$Stage_Binary, useNA = "ifany")
+feature_groups <- list(Clinical = c("Gender", "Age", "Blood_type", "Tumor_site", "T", "N", "M", "AJCC"),
+                       CTC = ("CTC"),
+                       Hematology = c("WBC", "Neu_abs", "Lym_abs", "Mon_abs", "Eos_abs", "Bas_abs", "Neu_pct", "Lym_pct", "Mon_pct", "Eos_pct", "Bas_pct", "RBC", "HGB", "HCT", "MCV", "MCH", "MCHC", "RDW_CV", "RDW_SD", "PLT", "MPV", "PDW", "PCT", "Large_PLT_abs", "P_LCR"),
+                       Immune = c("Reagent_LotID", "CD3_pct", "CD19_pct", "CD4_pct", "CD8_pct", "NK_pct", "Lymph_sum_pct", "CD4_CD8_ratio", "G2", "CD3_abs", "CD19_abs", "CD4_abs", "CD8_abs", "NK_abs", "CD45_abs"),
+                       LiverKidney = c( "ALT", "AST", "AST_ALT_ratio", "ALP", "GGT", "RBP", "PA", "TP", "ALB", "GLB", "AGR", "TBIL", "DBIL", "IBIL", "DBIL_IBIL_ratio", "CHE", "CG", "CysC", "BUN", "Cr", "CO2", "GLU"),
+                       TumorMarkers = c("CA125", "CA19_9", "CEA", "HSP90a"),
+                       Lipids = c("TC", "TG", "LDL_C", "HDL_C", "ApoA", "ApoB", "Lp_a"),
+                       FattyAcids = c("LCA", "DCA", "CDCA", "UDCA", "CA", "GLCA", "GDCA", "GCDCA", "GUDCA", "GCA", "TLCA", "TDCA", "TCDCA", "TUDCA", "TCA", "Hcy_1", "Cys_1", "Met_1", "FA_C10_0", "FA_C12_0", "FA_C14_1", "FA_C14_0", "FA_C16_1", "FA_C16_0", "FA_C18_3", "FA_C18_2", "FA_C18_1", "FA_C18_0", "FA_EPA", "FA_AA", "FA_C20_3", "FA_C20_2", "FA_C20_1", "FA_C20_0", "FA_DHA", "FA_DPA", "FA_C22_4", "FA_Erucic", "FA_C22_0", "FA_Nervonic", "FA_C24_0", "w3_w6_ratio", "Tri_Tetra_ratio", "Total_SFA", "Total_MUFA", "Total_PUFA", "Total_w3", "Total_w6", "Total_FA"),
+                       AminoAcids = c("TK1", "Ala", "Arg", "Asn", "Asp", "Cit", "Cys_2", "Gln", "Glu", "Gly", "Hcy_2", "His", "Leu", "Lys", "Met_2", "Orn", "Phe", "Pip", "Pro", "Ser", "Thr", "Trp", "Tyr", "Val"),
+                       Acylcarnitines = c( "C0", "C2", "C3", "C4", "C4_OH", "C4DC", "C5", "C5_OH", "C5DC", "C5_1", "C6", "C6DC", "C8", "C10", "C12", "C14", "C14_OH", "C14DC", "C14_1", "C16", "C16_OH", "C16_1_OH", "C18", "C20", "C22", "C24", "C26"),
+                       Ratio = c("Arg_Orn", "Cit_Arg", "Gly_Ala", "Met_Leu", "Met_Phe", "Orn_Cit", "Phe_Tyr", "Tyr_Cit", "Val_Phe", "C2_C0", "C3_C0", "C3_C2", "C3_C16", "C4_C2", "C4_C3", "C4_C8", "C5_C0", "C5_C2", "C5_C3", "C5_OH_C8", "C5_OH_C0", "C5DC_C5_OH", "C5DC_C16", "C8_C2", "C8_C10", "C16_OH_C16", "C26_C20", "C14_1_C16", "C3DC", "C3DC_C10", "C18_1", "C18_OH", "C18_1_OH", "C10_1", "C10_2", "C14_2",  "C18_2", "C10_2_C10", "C5DC_C8", "C0_2_3_16_18_1_Cit", "C16_C18_C0", "C0_C16_C18", "C3_Met"))
+data_clean <- data_raw
+exclude_cols <- c("Age", "Gender", "Blood_type", "Tumor_site", "T", "N", "M", "AJCC", "AJCC_Main", "Stage_Three", "Stage_Binary", "Reagent_LotID")
+modeling_features <- setdiff(names(data_clean), exclude_cols)
+modeling_features <- intersect(modeling_features, names(data_clean)[sapply(data_clean, is.numeric)])
+#######################
+##Figure 1
+#######################
+library(ggplot2)
+library(ggpubr)
+library(tidyverse)
+library(patchwork)
+data_raw <- read.delim("well_organized_data_cleaned.txt", header = TRUE, sep = "\t", stringsAsFactors = FALSE, encoding = "UTF-8")
+data_raw$AJCC_Main <- as.numeric(gsub("[abc]", "", data_raw$AJCC))
+
+data_raw$Stage_Three <- case_when(
+                                  data_raw$AJCC_Main %in% c(1, 2) ~ "Stage_I_II",
+                                  data_raw$AJCC_Main == 3 ~ "Stage_III",
+                                  data_raw$AJCC_Main == 4 ~ "Stage_IV",
+                                  TRUE ~ NA_character_
+                                  )
+data_raw$Stage_Three <- factor(data_raw$Stage_Three,  levels = c("Stage_I_II", "Stage_III", "Stage_IV"))
+data_three <- data_raw %>%  filter(!is.na(Stage_Three)) %>% droplevels()
+required_cols <- c("Age", "Gender", "Blood_type", "Tumor_site", "Stage_Three")
+missing_cols <- setdiff(required_cols, names(data_three))
+if(length(missing_cols) > 0) {
+                              stop(paste("lacking cols in data, please check colnames:", paste(missing_cols, collapse = ", ")))
+                              }
+stage_colors <- c("Stage_I_II" = "#66C2A5", "Stage_III" = "#FC8D62", "Stage_IV" = "#8DA0CB")
+set_colors <- c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00", "#FFFF33", "#A65628", "#F781BF")
+
+plot_data_age <- data_three %>% filter(!is.na(Age) & !is.na(Stage_Three))
+p_age_test <- kruskal.test(Age ~ Stage_Three, data = plot_data_age)$p.value
+pA <- ggboxplot(plot_data_age, x = "Stage_Three", y = "Age",  color = "Stage_Three", palette = stage_colors, add = "jitter", add.params = list(size = 1, alpha = 0.5),xlab = "Disease Stage",ylab = "Age (Years)",title = "A. Age Distribution") +
+                stat_compare_means(method = "kruskal.test", label.y.npc = "top") + theme_minimal(base_size = 12) + theme(legend.position = "none", plot.title = element_text(face = "bold"))
+plot_categorical <- function(data, var_name, title, palette_colors) { 
+                                                                     clean_data <- data %>% filter(!is.na(!!sym(var_name)) & !is.na(Stage_Three))
+                                                                     tbl <- table(clean_data[[var_name]], clean_data$Stage_Three)
+                                                                     p_val <- tryCatch({ chisq.test(tbl)$p.value }, error = function(e) {fisher.test(tbl, simulate.p.value = TRUE)$p.value})
+                                                                     cat(var_name, "vs Stage P-value:", p_val, "\n")
+                                                                     p_label <- paste0("Chi-square, p = ", signif(p_val, 3))
+                                                                     bar_data <- clean_data %>% group_by(Stage_Three, !!sym(var_name)) %>%  summarise(Count = n(), .groups = "drop") %>%  group_by(Stage_Three) %>%  mutate(Percentage = Count / sum(Count) * 100)
+                                                                     p <- ggplot(bar_data, aes(x = Stage_Three, y = Percentage, fill = !!sym(var_name))) +
+                                                                                 geom_bar(stat = "identity", position = "fill", color = "white") +
+                                                                                 scale_y_continuous(labels = scales::percent_format()) +
+                                                                                 scale_fill_manual(values = palette_colors) +
+                                                                                 labs(title = title, subtitle = p_label, x = "Disease stage", y = "Proportion", fill = var_name) +
+                                                                                 theme_minimal(base_size = 12) +
+                                                                                 theme(plot.title = element_text(face = "bold"), axis.text.x = element_text(angle = 45, hjust = 1))
+                                                                                 return(p)
+                                                                    }
+pB <- plot_categorical(data_three, "Gender", "B. Gender Distribution", c("#377EB8", "#E41A1C"))
+pC <- plot_categorical(data_three, "Blood_type", "C. Blood Type Distribution", c("#E41A1C", "#4DAF4A", "#984EA3", "#FF7F00"))
+location_colors <- colorRampPalette(set_colors)(length(unique(data_three$Tumor_site[!is.na(data_three$Tumor_site)])))
+pD <- plot_categorical(data_three, "Tumor_site", "D. Tumor Location Distribution", location_colors) + theme(legend.position = "right", legend.text = element_text(size = 8))
+#################
+##Figure 2
+#################
+my_comparisons <- list( c("Stage_I_II", "Stage_IV"), c("Stage_III", "Stage_IV") )
+stage_colors <- c("Stage_I_II" = "#66C2A5", "Stage_III" = "#FC8D62", "Stage_IV" = "#8DA0CB")
+for(category_name in names(feature_groups)) {                                                                                   
+                                             category_features <- intersect(feature_groups[[category_name]], names(data_three))
+                                             category_features <- category_features[sapply(data_three[category_features], is.numeric)]  
+                                             if(length(category_features) == 0) {
+                                                                                 cat("warn: do not find category name", category_name, " skip. \n")
+                                                                                 next
+                                                                                 }  
+p_values <- numeric(length(category_features))
+names(p_values) <- category_features  
+for(feat in category_features) {                                                                                                                                     
+                               test_data <- data_three[!is.na(data_three[[feat]]) & !is.na(data_three$Stage_Three), ]
+                               if(length(unique(test_data$Stage_Three)) >= 2 && nrow(test_data) > 3) {
+                                                                                                     test_res <- kruskal.test(test_data[[feat]] ~ test_data$Stage_Three)
+                                                                                                     p_values[feat] <- test_res$p.value
+                                                                                                     } 
+                               else {
+                                     p_values[feat] <- 1 
+                                     }
+                               }  
+sorted_features <- names(sort(p_values))
+top_features <- head(sorted_features, 6)
+plot_list <- list()
+for(i in seq_along(top_features)) {
+                                   feature <- top_features[i]
+                                   plot_data <- data_three %>% 
+                                   dplyr::select(Stage = Stage_Three, Value = all_of(feature)) %>%  
+                                   dplyr::filter(!is.na(Value) & !is.na(Stage))
+                                   p <- ggboxplot(plot_data, x = "Stage", y = "Value",color = "Stage", palette = stage_colors, 
+                                                  add = "jitter", add.params = list(size = 1, alpha = 0.5), 
+                                                  ylab = feature, xlab = FALSE, title = feature) +                                                     
+                                                  stat_compare_means(comparisons = my_comparisons,method = "wilcox.test",label = "p.format",step.increase = 0.12, tip.length = 0.02, size = 3.5) +          
+                                                  theme_minimal(base_size = 12) +
+                                                  theme(legend.position = "none",axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"), 
+                                                  plot.title = element_text(hjust = 0.5, face = "bold"))        
+                                                  plot_list[[i]] <- p
+                                   }
+combined_plot <- wrap_plots(plot_list, ncol = min(3, length(plot_list))) + 
+                            plot_annotation(title = paste("Distribution of", gsub("_", " ", category_name), "across stages"), 
+                            theme = theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5)))
+}
+
+library(dplyr)
+library(mixOmics) 
+pls_data <- data_clean %>% filter(!is.na(Stage_Three))
+X_matrix <- pls_data %>% dplyr::select(dplyr::all_of(modeling_features)) %>% as.matrix()
+mode(X_matrix) <- "numeric"
+X_matrix <- apply(X_matrix, 2, function(x) {
+                                           if(any(is.na(x))) x[is.na(x)] <- median(x, na.rm = TRUE)
+                                           return(x)
+                                           })
+valid_cols <- apply(X_matrix, 2, var) > 0
+X_matrix <- X_matrix[, valid_cols]
+Y_label <- factor(pls_data$Stage_Three, levels = c("Stage_I_II", "Stage_III", "Stage_IV"))
+set.seed(42)
+plsda_model <- mixOmics::plsda(X = X_matrix, Y = Y_label, ncomp = 2)
+mixOmics::plotIndiv(plsda_model,comp = c(1, 2), group = Y_label, ind.names = FALSE, ellipse = TRUE,legend = TRUE,title = 'mixOmics PLS-DA')
+
+library(ComplexHeatmap)
+library(circlize)
+library(RColorBrewer)
+library(dplyr)
+initial_features <- modeling_features
+feat_categories <- character(length(initial_features))
+for (i in seq_along(initial_features)) {
+                                       feat <- initial_features[i]
+                                       found_group <- "Other"
+                                       for (group_name in names(feature_groups)) {
+                                                                                  if (feat %in% feature_groups[[group_name]]) {
+                                                                                                                               found_group <- group_name
+                                                                                                                               break
+                                                                                                                              }
+                                                                                 }
+                                       feat_categories[i] <- found_group
+                                       }
+valid_indices <- !(feat_categories %in% c("Other", "Clinical"))
+plot_features <- initial_features[valid_indices]
+final_categories <- feat_categories[valid_indices]
+heatmap_df <- data_clean %>% filter(!is.na(Stage_Three)) %>% arrange(Stage_Three)
+mat <- as.matrix(heatmap_df[, plot_features])
+mat_scaled <- scale(mat)           
+mat_scaled <- t(mat_scaled)        
+mat_scaled[mat_scaled > 2] <- 2
+mat_scaled[mat_scaled < -2] <- -2
+col_anno <- HeatmapAnnotation(
+                              Stage = heatmap_df$Stage_Three,
+                              col = list(Stage = c("Stage_I_II" = "#66C2A5", "Stage_III" = "#FC8D62", "Stage_IV" = "#8DA0CB")),
+                              show_annotation_name = FALSE
+                             )
+unique_cats <- unique(final_categories)
+category_colors <- colorRampPalette(brewer.pal(8, "Set2"))(length(unique_cats))
+names(category_colors) <- unique_cats
+row_anno <- rowAnnotation(
+                          Category = final_categories,
+                          col = list(Category = category_colors),
+                          show_annotation_name = FALSE,
+                          show_legend = FALSE 
+                          )
+
+enrich_data <- data.frame(
+                          Pathway = c("Selenocompound metabolism",  "Alanine, aspartate and glutamate metabolism", "Arginine biosynthesis",  "Biosynthesis of unsaturated fatty acids"),
+                          P_Value = c(0.03724, 0.05187, 0.02617, 0.06636)
+                          )
+enrich_data <- enrich_data %>% mutate(logP = -log10(P_Value)) %>% arrange(logP) %>% mutate(Pathway = factor(Pathway, levels = Pathway)) 
+fig_enrich <- ggplot(enrich_data, aes(x = Pathway, y = logP, fill = logP)) + geom_bar(stat = "identity", width = 0.7, show.legend = FALSE) + 
+                                                           geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red", alpha = 0.5) + 
+                                                           coord_flip() + 
+                                                           scale_fill_gradient(low = "#9ecae1", high = "#084594") + 
+                                                           labs(x = NULL, y = "-log10(P-value)") + 
+                                                           theme_minimal(base_size = 12) +
+                                                           theme(panel.grid.major.y = element_blank(), 
+                                                           axis.text.y = element_text(face = "bold", color = "black"),
+                                                           axis.title.x = element_text(size = 10, face = "italic"),
+                                                           plot.margin = unit(c(0.1, 0.5, 0.1, 0.1), "cm") 
+                                                           )
+#########################
+##Figure 3, Figures S3-S5
+#########################
+library(dplyr)
+library(praznik)              
+library(randomForest)  
+library(pROC)                
+library(ggplot2)
+library(car)
+
+data_clean$Age <- ifelse(data_clean$Age < 65, "< 65", ">= 65")
+data_clean$Gender <- ifelse(grepl("(?i)^m", data_clean$Gender), "Male",  ifelse(grepl("(?i)^f", data_clean$Gender), "Female", NA))
+data_clean$Tumor_site <- ifelse(grepl("(?i)rectum", data_clean$Tumor_site), "Rectum", "Colon")
+data_cv_ready <- data_clean %>% dplyr::select(Stage_Three, Gender, Tumor_site, Age, where(is.numeric)) %>% na.omit()
+data_cv_ready <- data_cv_ready[,c(-5,-223)]
+data_cv_ready$Stage_Three <- as.factor(data_cv_ready$Stage_Three)
+n_total <- nrow(data_cv_ready)
+levels_stage <- levels(data_cv_ready$Stage_Three)
+
+set.seed(2026)
+folds <- createFolds(data_cv_ready$Stage_Three, k = 10, list = TRUE, returnTrain = FALSE)
+cat("========== Phase 1: Fully-nested 10-Fold CV for Feature Selection & OOF Eval ==========\n")
+cv_jmi_features <- list()
+oof_preds_fully_nested <- matrix(NA, nrow = nrow(data_cv_ready), ncol = length(levels(data_cv_ready$Stage_Three)))
+colnames(oof_preds_fully_nested) <- levels(data_cv_ready$Stage_Three)
+oof_labels <- data_cv_ready$Stage_Three
+for (i in 1:10) {
+                 cat(sprintf("\n--- Fold %d / 10 ---\n", i))  
+                 test_idx <- folds[[i]]
+                 train_fold <- data_cv_ready[-test_idx, ]
+                 test_fold  <- data_cv_ready[test_idx, ]  
+                 # Step 1: Kruskal-Wallis 
+                 train_features <- train_fold %>% dplyr::select(where(is.numeric))
+                 p_values <- apply(train_features, 2, function(x) { kruskal.test(x ~ train_fold$Stage_Three)$p.value })
+                 sig_features <- names(p_values)[which(p_values < 0.02)]
+                 if(length(sig_features) < 10) sig_features <- names(sort(p_values))[1:10]  
+                 # Step 2: JMI
+                 x_train_jmi <- train_fold[, sig_features, drop = FALSE]
+                 y_train_jmi <- train_fold$Stage_Three  
+                 max_k <- min(20, length(sig_features))
+                 jmi_res <- JMI(x_train_jmi, y_train_jmi, k = max_k)
+                 scores <- jmi_res$score
+                 selections <- names(jmi_res$selection)  
+                 keep_idx <- which(scores > 0.5)  
+                 if(length(keep_idx) == 0) { 
+                                           keep_idx <- 1 
+                                           }
+                 fold_selected_features <- selections[keep_idx]
+                 cv_jmi_features[[i]] <- fold_selected_features 
+                 # Step 3: Fully-nested 
+                 fold_formula <- as.formula(paste("Stage_Three ~", paste(fold_selected_features, collapse = " + "))) 
+                 set.seed(123 + i)
+                 class_counts <- table(train_fold$Stage_Three)
+                 class_weights <- max(class_counts) / class_counts 
+              
+                 fold_rf_model <- randomForest(
+                                              fold_formula, 
+                                              data = train_fold, 
+                                              ntree = 1000,              
+                                              classwt = class_weights,   
+                                              importance = TRUE         
+                                              )
+                 fold_preds <- predict(fold_rf_model, newdata = test_fold, type = "prob")
+                 oof_preds_fully_nested[test_idx, ] <- fold_preds
+                }
+
+colnames(oof_preds_fully_nested) <- levels(oof_labels) 
+roc_fully_nested <- pROC::multiclass.roc(response = oof_labels, predictor = oof_preds_fully_nested)
+feature_freq <- as.data.frame(table(unlist(cv_jmi_features)))
+colnames(feature_freq) <- c("Feature", "Frequency")
+feature_freq <- feature_freq[order(-feature_freq$Frequency), ]
+final_features <- as.character(feature_freq$Feature[1:min(10, nrow(feature_freq))])
+top_features_plot <- feature_freq[1:min(36, nrow(feature_freq)), ]
+p_stability <- ggplot(top_features_plot, aes(x = reorder(Feature, Frequency), y = Frequency)) +
+                      geom_bar(stat = "identity", fill = "#4DBBD5", width = 0.7) + 
+                      coord_flip() + 
+                      scale_y_continuous(breaks = seq(0, 10, by = 1), limits = c(0, 10)) + 
+                      theme_classic() +
+                      labs(title = "JMI Feature Selection Stability across 10 Folds", 
+                      x = "Selected Features", y = "Selection Frequency") +
+                      theme(axis.text.y = element_text(face = "bold", size = 11))
+print(p_stability)
+
+cat("\n========== Collinearity Check (VIF) & Model-Agnostic Pruning ==========\n")
+current_features <- final_features
+formula_initial <- as.formula(paste("as.numeric(Stage_Three) ~", paste(current_features, collapse = " + ")))
+lm_initial <- lm(formula_initial, data = data_cv_ready)
+vif_initial <- car::vif(lm_initial)
+df_vif_initial <- data.frame(Feature = names(vif_initial), VIF = vif_initial, Status = "Before Pruning")
+
+repeat {
+       formula_vif <- as.formula(paste("as.numeric(Stage_Three) ~", paste(current_features, collapse = " + ")))
+       dummy_lm <- lm(formula_vif, data = data_cv_ready)
+       vif_vals <- car::vif(dummy_lm)
+       max_vif <- max(vif_vals)  
+       if(max_vif < 10) {
+                         break 
+                        }
+       problem_feature <- names(vif_vals)[which.max(vif_vals)]
+       cor_matrix <- cor(data_cv_ready[, current_features])
+       cor_with_problem <- abs(cor_matrix[, problem_feature])
+       cor_with_problem <- cor_with_problem[names(cor_with_problem) != problem_feature]
+       partner_feature <- names(cor_with_problem)[which.max(cor_with_problem)]
+  
+       p_val_problem <- kruskal.test(data_cv_ready[[problem_feature]] ~ data_cv_ready$Stage_Three)$p.value
+       p_val_partner <- kruskal.test(data_cv_ready[[partner_feature]] ~ data_cv_ready$Stage_Three)$p.value
+       if(p_val_problem > p_val_partner) {
+                                          drop_feat <- problem_feature
+                                         } 
+       else {
+             drop_feat <- partner_feature
+            }
+       current_features <- setdiff(current_features, drop_feat)
+       }
+final_features <- current_features
+
+formula_final <- as.formula(paste("as.numeric(Stage_Three) ~", paste(final_features, collapse = " + ")))
+lm_final <- lm(formula_final, data = data_cv_ready)
+vif_final <- car::vif(lm_final)
+df_vif_final <- data.frame(Feature = names(vif_final), VIF = vif_final, Status = "After Pruning")
+removed_features <- setdiff(names(vif_initial), final_features)
+if(length(removed_features) > 0) {
+                                  df_removed <- data.frame(Feature = removed_features, VIF = 0, Status = "After Pruning")
+                                  df_vif_final <- rbind(df_vif_final, df_removed)
+                                  }
+
+df_vif_plot <- rbind(df_vif_initial, df_vif_final)
+df_vif_plot$Status <- factor(df_vif_plot$Status, levels = c("Before Pruning", "After Pruning"))
+p_vif <- ggplot(df_vif_plot, aes(x = reorder(Feature, VIF), y = VIF, fill = Status)) +
+                             geom_bar(stat = "identity", position = "dodge", width = 0.7) +
+                             geom_hline(yintercept = 10, linetype = "dashed", color = "red", linewidth = 1) +                            
+                             annotate("text", x = 1.5, y = 11, label = "VIF Threshold = 10", color = "red", size = 4) +
+                             coord_flip() +
+                             scale_fill_manual(values = c("Before Pruning" = "#E64B35", "After Pruning" = "#4DBBD5")) +
+                             theme_classic() +
+                             labs(title = "Multicollinearity Mitigation (VIF Analysis)",
+                             x = "Metabolic Features",
+                             y = "Variance Inflation Factor (VIF)") +
+                             theme(axis.text.y = element_text(face = "bold", size = 10),
+                             legend.position = "top",
+                             legend.title = element_blank())
+
+# final_features 10-Fold CV (three models)
+xgb_grid <- expand.grid(
+                        max_depth = c(1, 2, 3, 4),             
+                        eta = c(0.01, 0.03, 0.05, 0.1),       
+                        nrounds = c(100, 200, 300),           
+                        gamma = c(0, 0.1, 0.5),               
+                        lambda = c(0.1, 1, 10),                
+                        min_child_weight = c(1, 3, 5),         
+                        subsample = 0.8,
+                        colsample_bytree = 0.8
+                       )
+
+cat(sprintf("XGBoost Grid Search: %d combinations will be evaluated via OOF...\n", nrow(xgb_grid)))
+levels_stage <- levels(data_cv_ready$Stage_Three)
+
+oof_rf <- data.frame()
+oof_mlr <- data.frame()
+oof_xgb_list <- vector("list", nrow(xgb_grid)) 
+for(k in 1:nrow(xgb_grid)) oof_xgb_list[[k]] <- data.frame()
+rf_models_list <- list() 
+formula_cv <- as.formula(paste("Stage_Three ~", paste(final_features, collapse = " + ")))
+
+class_freq <- table(data_cv_ready$Stage_Three)
+class_weights <- max(class_freq) / class_freq
+best_mtry <- max(floor(sqrt(length(final_features))), 1) 
+for (i in 1:10) {
+                 cat(sprintf("Model Training - Fold %d / 10\n", i))  
+                 test_idx <- folds[[i]]
+                 train_fold <- data_cv_ready[-test_idx, ]
+                 test_fold  <- data_cv_ready[test_idx, ]
+base_info <- data.frame(
+                        Sample_ID = rownames(test_fold),
+                        Actual_Stage = test_fold$Stage_Three,
+                        CA125 = test_fold$CA125,
+                        CA19_9 = test_fold$CA19_9,
+                        CEA = test_fold$CEA,
+                        HSP90a = test_fold$HSP90a,
+                        Gender = test_fold$Gender,
+                        Age = test_fold$Age,
+                        Tumor_site = test_fold$Tumor_site,
+                        stringsAsFactors = FALSE
+                       )
+add_cols <- setdiff(final_features, colnames(base_info))
+if (length(add_cols) > 0) {
+                          base_info <- cbind(base_info, test_fold[, add_cols, drop=FALSE])
+                          }
+
+# ---------- A. Random Forest ----------
+set.seed(123 + i)
+model_rf <- randomForest(formula_cv, data = train_fold, ntree = 1000, mtry = best_mtry, classwt = class_weights)    
+rf_models_list[[i]] <- model_rf 
+prob_rf <- as.data.frame(predict(model_rf, newdata = test_fold, type = "prob"))
+colnames(prob_rf) <- levels_stage
+oof_rf <- bind_rows(oof_rf, cbind(base_info, prob_rf, Model = "Random Forest"))
+# ---------- B. Multinomial LR ----------
+model_mlr <- nnet::multinom(formula_cv, data = train_fold, trace = FALSE, maxit = 500)
+prob_mlr <- as.data.frame(predict(model_mlr, newdata = test_fold, type = "probs"))
+colnames(prob_mlr) <- levels_stage
+oof_mlr <- bind_rows(oof_mlr, cbind(base_info, prob_mlr, Model = "Multinomial LR"))
+# ---------- C. XGBoost Grid Search ----------
+y_train_num <- as.numeric(train_fold$Stage_Three) - 1 
+train_class_counts <- table(train_fold$Stage_Three)
+xgb_weight_map <- max(train_class_counts) / train_class_counts
+train_weights <- as.numeric(xgb_weight_map[train_fold$Stage_Three])
+dtrain <- xgb.DMatrix(data = as.matrix(train_fold[, final_features, drop=FALSE]),label = y_train_num, weight = train_weights)
+dtest  <- xgb.DMatrix(data = as.matrix(test_fold[, final_features, drop=FALSE]))
+for (k in 1:nrow(xgb_grid)) {
+                             xgb_params <- list(
+                                                objective = "multi:softprob", 
+                                                num_class = length(levels_stage), 
+                                                eval_metric = "mlogloss", 
+                                                max_depth = xgb_grid$max_depth[k],              
+                                                eta = xgb_grid$eta[k],                 
+                                                min_child_weight = xgb_grid$min_child_weight[k], 
+                                                gamma = xgb_grid$gamma[k],                 
+                                                lambda = xgb_grid$lambda[k],               
+                                                subsample = xgb_grid$subsample[k],         
+                                                colsample_bytree = xgb_grid$colsample_bytree[k] 
+                                                )  
+                            set.seed(123 + i)
+                            model_gbm_k <- xgb.train(params = xgb_params, data = dtrain, nrounds = 150, verbose = 0)   
+                            prob_gbm_mat <- as.data.frame(matrix(predict(model_gbm_k, dtest), ncol = length(levels_stage), byrow = TRUE))
+                            colnames(prob_gbm_mat) <- levels_stage
+                            oof_xgb_list[[k]] <- bind_rows(oof_xgb_list[[k]], cbind(base_info, prob_gbm_mat, Model = "XGBoost (GBM)"))
+                            }
+}
+
+#  XGBoost OOF parameters
+tune_results <- data.frame()
+for (k in 1:nrow(xgb_grid)) {
+                             curr_oof <- oof_xgb_list[[k]]
+                             curr_label <- ifelse(curr_oof$Actual_Stage == "Stage_IV", 1, 0)
+                             roc_bin_k <- pROC::roc(response = curr_label, predictor = curr_oof$Stage_IV, quiet = TRUE)
+                             auc_k <- as.numeric(pROC::auc(roc_bin_k)) 
+                             tune_results <- rbind(tune_results, cbind(xgb_grid[k, , drop=FALSE], OOF_AUC = auc_k))
+                            }
+best_xgb_idx <- which.max(tune_results$OOF_AUC)
+best_xgb_params <- xgb_grid[best_xgb_idx, ]
+oof_gbm <- oof_xgb_list[[best_xgb_idx]] 
+best_auc_val <- max(tune_results$OOF_AUC) 
+p_reviewer <- ggplot(tune_results, aes(x = as.factor(max_depth), y = OOF_AUC, fill = as.factor(max_depth))) +
+                     geom_boxplot(alpha = 0.6, outlier.shape = NA) +
+                     geom_jitter(width = 0.2, color = "black", size = 1.5, alpha = 0.7) +
+                     geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50", linewidth = 1) +
+                     geom_hline(yintercept = best_auc_val, linetype = "dashed", color = "#E64B35", linewidth = 1) +
+                     facet_grid(gamma ~ lambda, labeller = label_bquote(rows = gamma == .(gamma), cols = lambda == .(lambda))) +  theme_bw(base_size = 14) +
+                     labs(title = "XGBoost True OOF Performance Across Hyperparameter Grid",
+                     subtitle = sprintf("L2 penalty (lambda) vs Pruning (gamma). Best AUC = %.3f", best_auc_val),
+                     x = "Max depth (1 = decision stump)", 
+                     y = "Out-of-fold (OOF) AUC (predicting stage IV)") + 
+                     theme(legend.position = "none",
+                     plot.title = element_text(face = "bold"), 
+                     strip.background = element_rect(fill = "gray90"))
+print(p_reviewer)
+
+# OOF Sensitivity Analysis
+all_models_oof <- rbind(oof_rf, oof_mlr, oof_gbm)
+
+sensitivity_results <- data.frame()
+models_to_test <- c("Random Forest", "Multinomial LR", "XGBoost (GBM)")
+for (mod in models_to_test) {tmp_data <- all_models_oof[all_models_oof$Model == mod, ]
+                             roc_multi <- pROC::multiclass.roc(response = tmp_data$Actual_Stage, 
+                             predictor = as.matrix(tmp_data[, levels_stage]))
+                             multi_auc <- as.numeric(pROC::auc(roc_multi))
+                             tmp_data$Is_Stage_IV <- ifelse(tmp_data$Actual_Stage == "Stage_IV", 1, 0)
+                             roc_iv <- pROC::roc(tmp_data$Is_Stage_IV, tmp_data$Stage_IV, quiet = TRUE)
+                             iv_auc <- as.numeric(pROC::auc(roc_iv))
+                             sensitivity_results <- rbind(sensitivity_results, data.frame(
+                                                                                          Model = mod,
+                                                                                          Multi_Class_AUC = round(multi_auc, 4),
+                                                                                          Stage_IV_AUC = round(iv_auc, 4)))
+                            }
+
+# Fully-nested OOF vs. Semi-nested OOF 
+oof_semi <- oof_rf
+rownames(oof_semi) <- oof_semi$Sample_ID
+oof_semi <- oof_semi[rownames(data_cv_ready), ]
+if(exists("oof_preds_fully_nested")) {
+oof_fully <- as.data.frame(oof_preds_fully_nested)
+  
+roc_multi_semi <- pROC::multiclass.roc(response = oof_semi$Actual_Stage, predictor = as.matrix(oof_semi[, levels_stage]))
+roc_multi_fully <- pROC::multiclass.roc(response = oof_semi$Actual_Stage, predictor = as.matrix(oof_fully[, levels_stage]))
+auc_multi_semi <- as.numeric(pROC::auc(roc_multi_semi))
+auc_multi_fully <- as.numeric(pROC::auc(roc_multi_fully))
+
+actual_is_iv <- ifelse(oof_semi$Actual_Stage == "Stage_IV", 1, 0)
+prob_iv_semi <- oof_semi$Stage_IV
+prob_iv_fully <- oof_fully$Stage_IV
+  
+roc_bin_semi <- pROC::roc(actual_is_iv, prob_iv_semi, quiet = TRUE)
+roc_bin_fully <- pROC::roc(actual_is_iv, prob_iv_fully, quiet = TRUE)
+auc_bin_semi <- as.numeric(pROC::auc(roc_bin_semi))
+auc_bin_fully <- as.numeric(pROC::auc(roc_bin_fully))
+  
+delong_res <- pROC::roc.test(roc_bin_fully, roc_bin_semi, method = "delong", paired = TRUE)
+  
+set.seed(42) 
+n_boot <- 1000
+n_samples <- nrow(oof_semi)
+boot_diffs <- numeric(n_boot)
+  
+pred_semi_mat <- as.matrix(oof_semi[, levels_stage])
+pred_fully_mat <- as.matrix(oof_fully[, levels_stage])
+actual_labels <- oof_semi$Actual_Stage
+valid_b <- 0
+for(b in 1:n_boot) {
+                   idx <- sample(1:n_samples, replace = TRUE)
+                   if(length(unique(actual_labels[idx])) == length(levels_stage)) {
+                   auc_s <- as.numeric(pROC::auc(pROC::multiclass.roc(response = actual_labels[idx], predictor = pred_semi_mat[idx, ], quiet = TRUE)))
+                   auc_f <- as.numeric(pROC::auc(pROC::multiclass.roc(response = actual_labels[idx], predictor = pred_fully_mat[idx, ], quiet = TRUE)))
+                   valid_b <- valid_b + 1
+                   boot_diffs[valid_b] <- auc_f - auc_s 
+                   }
+}
+boot_diffs <- boot_diffs[1:valid_b] 
+mean_diff <- mean(boot_diffs)
+se_diff <- sd(boot_diffs)
+p_val_multi <- 2 * pnorm(-abs(mean_diff / se_diff))
+}
+
+
+leakage_data <- data.frame(
+                           Validation_Strategy = c("Fully-Nested CV", "Semi-Nested CV (Final)"),
+                           Multi_Class_AUC = c(0.7824, 0.8061),
+                           Stage_IV_AUC = c(0.8360, 0.8606)
+                           )
+plot_data <- leakage_data %>% pivot_longer(cols = c("Multi_Class_AUC", "Stage_IV_AUC"), names_to = "Metric",values_to = "AUC") %>% 
+             mutate(Metric = factor(ifelse(Metric == "Stage_IV_AUC", "Stage IV (Binary) AUC", "Overall Multi-class AUC"),
+                    levels = c("Stage IV (Binary) AUC", "Overall Multi-class AUC")),
+                    Validation_Strategy = factor(Validation_Strategy, levels = c("Fully-Nested CV", "Semi-Nested CV (Final)"))
+                   )
+p_leakage <- ggplot(plot_data, aes(x = Metric, y = AUC, fill = Validation_Strategy)) +
+                    geom_bar(stat = "identity", position = position_dodge(width = 0.7), width = 0.6, color = "black") +
+                    geom_text(aes(label = sprintf("%.4f", AUC)), 
+                    position = position_dodge(width = 0.7), vjust = -0.6, size = 4.5, fontface = "bold") +
+                    annotate("segment", x = 0.825, xend = 1.175, y = 0.91, yend = 0.91, linewidth = 0.8) +
+                    annotate("segment", x = 0.825, xend = 0.825, y = 0.89, yend = 0.91, linewidth = 0.8) +
+                    annotate("segment", x = 1.175, xend = 1.175, y = 0.89, yend = 0.91, linewidth = 0.8) +
+                    annotate("text", x = 1, y = 0.96, label = "DeLong test\nP = 0.0840", size = 4.5, fontface = "bold") +
+                    annotate("segment", x = 1.825, xend = 2.175, y = 0.86, yend = 0.86, linewidth = 0.8) +
+                    annotate("segment", x = 1.825, xend = 1.825, y = 0.84, yend = 0.86, linewidth = 0.8) +
+                    annotate("segment", x = 2.175, xend = 2.175, y = 0.84, yend = 0.86, linewidth = 0.8) +
+                    annotate("text", x = 2, y = 0.91, label = "Paired Bootstrap\nP = 0.0586", size = 4.5, fontface = "bold") +
+                    scale_fill_manual(values = c("Fully-Nested CV" = "#4DBBD5", "Semi-Nested CV (Final)" = "#E64B35")) +
+                    scale_y_continuous(limits = c(0, 1.05), breaks = seq(0, 1, 0.2)) +
+                    labs(title = "Validation Strategy Impact on Out-Of-Fold Performance",
+                    subtitle = "Both P-values > 0.05 indicates no significant data leakage.",
+                    x = "", y = "Area Under the Curve (AUC)",fill = "CV Strategy:") +
+                    theme_bw(base_size = 14) + theme(
+                                                     legend.position = "top",
+                                                     plot.title = element_text(face = "bold", hjust = 0.5),
+                                                     plot.subtitle = element_text(hjust = 0.5, face = "italic"),
+                                                     axis.text.x = element_text(face = "bold", size = 13),
+                                                     panel.grid.major.x = element_blank())
+
+# ROC OOF
+library(pROC)
+library(ggplot2)
+library(dplyr)
+library(dcurves) 
+library(PRROC)    
+library(yardstick)
+
+oof_rf$Is_Stage_IV  <- ifelse(oof_rf$Actual_Stage == "Stage_IV", 1, 0)
+oof_gbm$Is_Stage_IV <- ifelse(oof_gbm$Actual_Stage == "Stage_IV", 1, 0)
+oof_mlr$Is_Stage_IV <- ifelse(oof_mlr$Actual_Stage == "Stage_IV", 1, 0)
+
+get_roc_metrics <- function(roc_obj) {
+                                      best_coords <- pROC::coords(roc_obj, "best",ret = c("accuracy", "sensitivity", "specificity"), best.method = "youden",transpose = FALSE)  
+                                      acc <- best_coords$accuracy[1]
+                                      sen <- best_coords$sensitivity[1]
+                                      spe <- best_coords$specificity[1]
+                                      auc_val <- pROC::auc(roc_obj)
+                                      sprintf("AUC:%.3f (ACC:%.2f SEN:%.2f SPE:%.2f)", auc_val, acc, sen, spe)
+                                      }
+generate_full_metrics_table <- function(model_name, prob, actual_label) {
+                                                                         roc_obj <- pROC::roc(actual_label, prob, quiet = TRUE)
+                                                                         coords <- pROC::coords(roc_obj, "best", ret = c("threshold", "accuracy", "sensitivity", "specificity", "ppv", "npv"), 
+                                                                                                best.method = "youden", transpose = FALSE)  
+                                                                         auc_val <- as.numeric(pROC::auc(roc_obj))
+                                                                         ci_auc  <- as.numeric(pROC::ci(roc_obj))
+                                                                         pr_obj <- pr.curve(scores.class0 = prob[actual_label == 1],scores.class1 = prob[actual_label == 0])
+                                                                         f1_score <- 2 * (coords$ppv[1] * coords$sensitivity[1]) / (coords$ppv[1] + coords$sensitivity[1])
+                                                                         data.frame(
+                                                                                    Model       = model_name,
+                                                                                    ROC_AUC     = sprintf("%.3f (%.3f-%.3f)", auc_val, ci_auc[1], ci_auc[3]),
+                                                                                    PR_AUC      = sprintf("%.3f", pr_obj$auc.integral),
+                                                                                    Cutoff      = sprintf("%.3f", coords$threshold[1]),
+                                                                                    Accuracy    = sprintf("%.3f", coords$accuracy[1]),
+                                                                                    Sensitivity = sprintf("%.3f", coords$sensitivity[1]),
+                                                                                    Specificity = sprintf("%.3f", coords$specificity[1]),
+                                                                                    PPV         = sprintf("%.3f", coords$ppv[1]),
+                                                                                    NPV         = sprintf("%.3f", coords$npv[1]),
+                                                                                    F1_Score    = sprintf("%.3f", f1_score)
+                                                                                    )
+                                                                          }
+
+roc_rf  <- roc(oof_rf$Is_Stage_IV, oof_rf$Stage_IV, quiet = TRUE)
+roc_gbm <- roc(oof_gbm$Is_Stage_IV, oof_gbm$Stage_IV, quiet = TRUE)
+roc_mlr <- roc(oof_mlr$Is_Stage_IV, oof_mlr$Stage_IV, quiet = TRUE)
+
+metrics_rf  <- generate_full_metrics_table("Random Forest", oof_rf$Stage_IV, oof_rf$Is_Stage_IV)
+metrics_gbm <- generate_full_metrics_table("XGBoost", oof_gbm$Stage_IV, oof_gbm$Is_Stage_IV)
+metrics_mlr <- generate_full_metrics_table("Multinomial LR", oof_mlr$Stage_IV, oof_mlr$Is_Stage_IV)
+all_metrics_table <- rbind(metrics_rf, metrics_gbm, metrics_mlr)
+
+# Precision-Recall (PR) 
+oof_rf$Truth_Factor  <- factor(ifelse(oof_rf$Is_Stage_IV == 1, "Stage_IV", "Other"), levels = c("Other", "Stage_IV"))
+oof_gbm$Truth_Factor <- factor(ifelse(oof_gbm$Is_Stage_IV == 1, "Stage_IV", "Other"), levels = c("Other", "Stage_IV"))
+oof_mlr$Truth_Factor <- factor(ifelse(oof_mlr$Is_Stage_IV == 1, "Stage_IV", "Other"), levels = c("Other", "Stage_IV"))
+
+pr_rf_data  <- pr_curve(oof_rf, truth = Truth_Factor, Stage_IV, event_level = "second") %>% mutate(Model = "Random Forest")
+pr_gbm_data <- pr_curve(oof_gbm, truth = Truth_Factor, Stage_IV, event_level = "second") %>% mutate(Model = "XGBoost")
+pr_mlr_data <- pr_curve(oof_mlr, truth = Truth_Factor, Stage_IV, event_level = "second") %>% mutate(Model = "Multinomial LR")
+pr_all_data <- bind_rows(pr_rf_data, pr_gbm_data, pr_mlr_data)
+
+prauc_rf  <- pr_auc(oof_rf, truth = Truth_Factor, Stage_IV, event_level = "second")$.estimate
+prauc_gbm <- pr_auc(oof_gbm, truth = Truth_Factor, Stage_IV, event_level = "second")$.estimate
+prauc_mlr <- pr_auc(oof_mlr, truth = Truth_Factor, Stage_IV, event_level = "second")$.estimate
+
+model_levels <- c("Random Forest", "XGBoost", "Multinomial LR")
+model_labels <- c(
+                  sprintf("RF    (PR-AUC = %.3f)", prauc_rf),
+                  sprintf("XGB (PR-AUC = %.3f)", prauc_gbm),
+                  sprintf("MLR  (PR-AUC = %.3f)", prauc_mlr)
+                  )
+pr_all_data$Model <- factor(pr_all_data$Model, levels = model_levels, labels = model_labels)
+baseline_pr <- sum(oof_rf$Is_Stage_IV == 1) / nrow(oof_rf)
+p_pr_curve <- ggplot(pr_all_data, aes(x = recall, y = precision, color = Model)) +
+                     geom_line(size = 1.2, alpha = 0.85) +
+                     geom_hline(yintercept = baseline_pr, linetype = "dashed", color = "gray50", size = 1) +
+                     scale_color_manual(values = c("#E64B35", "#4DBBD5", "#00A087")) + 
+                     coord_fixed(ratio = 1) + 
+                     labs(
+                          title = "Precision-Recall Curves: Predicting Stage IV",
+                          x = "Recall (Sensitivity)",
+                          y = "Precision (Positive Predictive Value)",
+                          color = NULL) +
+                     theme_classic(base_size = 14) +
+                     theme(
+                           legend.position = c(0.35, 0.25),      
+                           legend.background = element_rect(fill = "transparent", color = NA),
+                           legend.text = element_text(size = 11),
+                           panel.grid.major = element_line(color = "gray90", linetype = "dashed"),
+                           plot.title = element_text(face = "bold", hjust = 0.5))
+
+#  ROC (1-vs-Rest)
+levels_stage <- levels(data_cv_ready$Stage_Three)  
+colors_multi <- c("#E64B35", "#4DBBD5", "#00A087")
+
+winning_oof <- oof_rf 
+plot(x = NA, y = NA, xlim = c(0, 1), ylim = c(0, 1), xlab = "1 - Specificity", ylab = "Sensitivity", main = "Multiclass ROC (1-vs-Rest) by Random Forest")
+abline(0, 1, col = "gray70", lty = 2)
+grid(col = "gray90")
+legend_text <- c()
+pdf("rf.pdf", width = 8, height = 7)
+for (j in seq_along(levels_stage)) {
+                                    lvl <- levels_stage[j]
+                                    true_label <- as.numeric(winning_oof$Actual_Stage == lvl)
+                                    pred_prob  <- as.numeric(winning_oof[[lvl]])
+                                    roc_obj <- roc(response = true_label, predictor = pred_prob, quiet = TRUE)
+                                    x_coords <- 1 - roc_obj$specificities
+                                    y_coords <- roc_obj$sensitivities
+                                    lines(x = x_coords, y = y_coords, col = colors_multi[j], lwd = 3)
+                                    metrics_str <- get_roc_metrics(roc_obj)
+                                    legend_text <- c(legend_text, paste(lvl, "vs Rest |", metrics_str))
+                                    }
+legend("bottomright", legend = legend_text, col = colors_multi[seq_along(levels_stage)], lwd = 3, bty = "n", cex = 0.85)
+dev.off()
+
+winning_oof <- oof_gbm 
+pdf("gbm.pdf", width = 8, height = 7)
+plot(x = NA, y = NA, xlim = c(0, 1), ylim = c(0, 1), xlab = "1 - Specificity", ylab = "Sensitivity", main = "Multiclass ROC (1-vs-Rest) by XGBoost")
+abline(0, 1, col = "gray70", lty = 2)
+grid(col = "gray90")
+legend_text <- c()
+for (j in seq_along(levels_stage)) {
+                                   lvl <- levels_stage[j]
+                                   true_label <- as.numeric(winning_oof$Actual_Stage == lvl)
+                                   pred_prob  <- as.numeric(winning_oof[[lvl]])
+                                   roc_obj <- roc(response = true_label, predictor = pred_prob, quiet = TRUE)
+                                   x_coords <- 1 - roc_obj$specificities
+                                   y_coords <- roc_obj$sensitivities
+                                   lines(x = x_coords, y = y_coords, col = colors_multi[j], lwd = 3)
+                                   metrics_str <- get_roc_metrics(roc_obj)
+                                   legend_text <- c(legend_text, paste(lvl, "vs Rest |", metrics_str))
+                                   }
+legend("bottomright", legend = legend_text, col = colors_multi[seq_along(levels_stage)],lwd = 3, bty = "n", cex = 0.85)
+dev.off()
+
+winning_oof <- oof_mlr 
+pdf("mlr.pdf", width = 8, height = 7)
+plot(x = NA, y = NA, xlim = c(0, 1), ylim = c(0, 1), xlab = "1 - Specificity", ylab = "Sensitivity", main = "Multiclass ROC (1-vs-Rest) by MLR")
+abline(0, 1, col = "gray70", lty = 2)
+grid(col = "gray90")
+legend_text <- c()
+for (j in seq_along(levels_stage)) {
+                                    lvl <- levels_stage[j]
+                                    true_label <- as.numeric(winning_oof$Actual_Stage == lvl)
+                                    pred_prob  <- as.numeric(winning_oof[[lvl]])
+                                    roc_obj <- roc(response = true_label, predictor = pred_prob, quiet = TRUE)
+                                    x_coords <- 1 - roc_obj$specificities
+                                    y_coords <- roc_obj$sensitivities
+                                    lines(x = x_coords, y = y_coords, col = colors_multi[j], lwd = 3)
+                                    metrics_str <- get_roc_metrics(roc_obj)
+                                    legend_text <- c(legend_text, paste(lvl, "vs Rest |", metrics_str))
+                                    }
+legend("bottomright", legend = legend_text, col = colors_multi[seq_along(levels_stage)], lwd = 3, bty = "n", cex = 0.85)
+dev.off()
+
+# model vs biomarker
+winning_oof <- oof_rf 
+winning_oof$Is_Stage_IV <- ifelse(winning_oof$Actual_Stage == "Stage_IV", 1, 0)
+clinical_features <- c("CA125", "CA19_9", "CEA", "HSP90a")
+color_model <- "#E64B35" 
+color_features <- c("#4DBBD5", "#00A087", "#3C5488", "#F39B7F")
+pdf("Model_vs_MultipleFactors.pdf", width = 9, height = 8)
+plot(roc_rf, col = color_model, lwd = 4, legacy.axes = TRUE, main = "RF Panel vs Clinical Biomarkers (Predicting Stage IV)")
+grid(col = "gray90")
+
+legend_text <- c(paste("RF Panel |", get_roc_metrics(roc_rf)))
+legend_cols <- c(color_model)
+legend_lwd  <- c(4)
+
+cat("\nDeLong Test P-values (RF Panel vs Single Biomarkers)\n")
+for (i in 1:length(clinical_features)) {
+                                        feat <- clinical_features[i]
+                                        if (feat %in% colnames(winning_oof)) {
+                                                                              val <- as.numeric(winning_oof[[feat]])
+                                                                              roc_temp <- pROC::roc(winning_oof$Is_Stage_IV, val, quiet = TRUE)
+                                                                              plot(roc_temp, col = color_features[i], lwd = 2, add = TRUE)    
+                                                                              metrics_str <- get_roc_metrics(roc_temp)
+                                                                              legend_text <- c(legend_text, paste(sprintf("%-10s", feat), "|", metrics_str))
+                                                                              legend_cols <- c(legend_cols, color_features[i])
+                                                                              legend_lwd  <- c(legend_lwd, 2)    
+                                                                              p_val <- pROC::roc.test(roc_rf, roc_temp, method = "delong")$p.value
+                                                                              cat(sprintf("RF Panel vs %-10s : P-value = %.4e\n", feat, p_val))    
+                                                                              } 
+                                        else {
+                                              cat(sprintf("don't find. please check£¡\n", feat))
+                                             }
+                                        }
+legend("bottomright", legend = legend_text, col = legend_cols, lwd = legend_lwd, bty = "n", cex = 0.85)
+dev.off()
+
+# DCA
+dca_res <- dca(Is_Stage_IV ~ Stage_IV, data = winning_oof, thresholds = seq(0, 0.8, by = 0.01), label = list(Stage_IV = "Random Forest Panel")) 
+pdf("output/Figure 3/Figure_3_Clinical_DCA_single.pdf", width = 8, height = 6)
+p_dca <- plot(dca_res, smooth = TRUE) + theme_classic() +
+              scale_color_manual(values = c("Treat All" = "gray60", "Treat None" = "black", "Random Forest Panel" = "#E64B35")) +
+              labs(title = "Decision Curve Analysis", x = "Threshold Probability", y = "Net Benefit", color = "Strategy") + 
+              theme(legend.position = c(0.75, 0.75), legend.background = element_rect(fill = "transparent", color = NA),
+              plot.title = element_text(hjust = 0.5, face = "bold"))
+print(p_dca)
+dev.off()
+
+winning_oof$RF_Prob  <- oof_rf$Stage_IV
+winning_oof$GBM_Prob <- oof_gbm$Stage_IV
+winning_oof$MLR_Prob <- oof_mlr$Stage_IV
+dca_res_multi <- dca(Is_Stage_IV ~ RF_Prob + GBM_Prob + MLR_Prob, data = winning_oof, thresholds = seq(0, 0.8, by = 0.01),label = list(RF_Prob = "Random Forest Panel", GBM_Prob = "XGBoost", MLR_Prob = "Multinomial LR"))
+pdf("output/Figure 3/Figure_3_Clinical_DCA_Multi.pdf", width = 8, height = 6)
+p_dca_multi <- plot(dca_res_multi, smooth = TRUE) + theme_classic() + 
+                    scale_color_manual(values = c("Treat All" = "gray60", "Treat None" = "black", 
+                    "Random Forest Panel" = "#E64B35", "XGBoost" = "#4DBBD5", "Multinomial LR" = "#00A087")) + 
+                    labs(title = "Decision Curve Analysis", x = "Threshold Probability", y = "Net Benefit", color = "Strategy") + 
+                    theme(legend.position = c(0.75, 0.70), legend.background = element_rect(fill = "transparent", color = NA),plot.title = element_text(hjust = 0.5, face = "bold"))
+print(p_dca_multi)
+dev.off()
+
+# subgroup ROC 
+calculate_subgroup_auc <- function(data, group_var, nice_name = group_var) {
+                                                                            groups <- unique(data[[group_var]])
+                                                                            groups <- groups[!is.na(groups) & groups != ""]
+                                                                            res <- data.frame()
+                                                                            for(g in groups) {
+                                                                                              sub_data <- data[data[[group_var]] == g, ]
+                                                                                              tryCatch({   
+                                                                                                        if(length(unique(sub_data$Is_Stage_IV)) == 2 && nrow(sub_data) > 5) {
+                                                                                                           roc_obj <- roc(sub_data$Is_Stage_IV, sub_data$Stage_IV, quiet = TRUE)
+                                                                                                           ci_obj <- ci(roc_obj)
+                                                                                                           res <- rbind(res, data.frame(
+                                                                                                                                        Subgroup = paste(nice_name, g, sep = ": "), 
+                                                                                                                                        N = nrow(sub_data), 
+                                                                                                                                        AUC = as.numeric(ci_obj[2]), Lower = as.numeric(ci_obj[1]), Upper = as.numeric(ci_obj[3])
+                                                                                                                                         ))
+                                                                                                          }}, error = function(e){}) 
+                                                                                               }
+                                                                            return(res)
+                                                                            }
+all_subgroups <- bind_rows(
+                           calculate_subgroup_auc(winning_oof, "Gender", nice_name = "Gender"), 
+                           calculate_subgroup_auc(winning_oof, "Age", nice_name = "Age"),       
+                           calculate_subgroup_auc(winning_oof, "Tumor_site", nice_name = "Site")
+                           )
+
+roc_rf_overall <- roc(winning_oof$Is_Stage_IV, winning_oof$Stage_IV, quiet = TRUE)
+overall_ci <- ci(roc_rf_overall)
+all_subgroups <- rbind(
+                       data.frame(Subgroup = "Overall Cohort", N = nrow(winning_oof), 
+                       AUC = overall_ci[2], Lower = overall_ci[1], Upper = overall_ci[3]), 
+                       all_subgroups
+                      )
+all_subgroups$Subgroup <- factor(all_subgroups$Subgroup, levels = rev(all_subgroups$Subgroup))
+
+pdf("output/Figure 3/Figure_4_Subgroup_ForestPlot.pdf", width = 8, height = 6)
+p_forest <- ggplot(all_subgroups, aes(x = AUC, y = Subgroup)) +
+                   geom_errorbarh(aes(xmin = Lower, xmax = Upper), height = 0.2, color = "#3C5488", lwd = 1) +
+                   geom_point(aes(size = N), color = "#E64B35") + 
+                   scale_size_continuous(range = c(0, 6), name = "Sample Size") + 
+                   geom_vline(xintercept = 0.5, linetype = "dashed", color = "gray50") +
+                   geom_vline(xintercept = overall_ci[2], linetype = "dotted", color = "#E64B35", lwd = 1) +
+                   theme_bw() + 
+                   labs(title = "Subgroup Analysis (Random Forest)", x = "AUC with 95% CI", y = "") +
+                   theme(axis.text.y = element_text(size = 11, color = "black"),
+                   axis.text.x = element_text(size = 11, color = "black"),
+                   plot.title = element_text(face = "bold", hjust = 0.5))
+print(p_forest)
+dev.off()
+
+# Permutation Test (Ensemble Model)
+cat("========== Phase 4: Permutation Test for Feature Importance ==========\n")
+winning_oof <- oof_rf
+winning_oof$Is_Stage_IV <- ifelse(winning_oof$Actual_Stage == "Stage_IV", 1, 0)
+baseline_roc <- pROC::roc(winning_oof$Is_Stage_IV, winning_oof$Stage_IV, quiet = TRUE)
+baseline_auc <- pROC::auc(baseline_roc)
+
+perm_results <- data.frame(Feature = character(), AUC_Drop = numeric(), P_value = numeric())
+for(feat in final_features) {
+                             perm_aucs <- numeric(100)
+                             for(p in 1:100) {
+                                              temp_data <- data_cv_ready
+                                              set.seed(p)
+                                              temp_data[[feat]] <- sample(temp_data[[feat]])
+                                              fold_preds <- list()
+                                              for(i in 1:10) {
+                                                              test_idx <- folds[[i]]
+                                                              test_fold  <- temp_data[test_idx, ]
+                                                              preds <- predict(rf_models_list[[i]], newdata = test_fold, type = "prob")[, "Stage_IV"]
+                                                              fold_preds <- c(fold_preds, preds)
+                                                              }
+                                               temp_oof_pred <- unlist(fold_preds)
+                                               temp_auc <- pROC::auc(pROC::roc(winning_oof$Is_Stage_IV, temp_oof_pred, quiet = TRUE))
+                                               perm_aucs[p] <- temp_auc
+                                               }  
+                             mean_perm_auc <- mean(perm_aucs)
+                             auc_drop <- baseline_auc - mean_perm_auc
+                             p_val <- sum(perm_aucs >= baseline_auc) / 100
+                             if(p_val == 0) p_val <- "<0.01"
+                             perm_results <- rbind(perm_results, data.frame(Feature = feat, AUC_Drop = auc_drop, P_value = p_val))
+                             }
+
+perm_results <- perm_results[order(-perm_results$AUC_Drop), ]
+pdf("Permutation_Importance.pdf", width = 7, height = 5)
+p_perm <- ggplot(perm_results, aes(x = reorder(Feature, AUC_Drop), y = AUC_Drop)) +
+                 geom_col(fill = "#E64B35", width = 0.6) + coord_flip() + theme_classic() +
+                 labs(title = "Permutation Feature Importance", x = "Features", y = "Drop in AUC when permuted") +
+                 theme(axis.text.y = element_text(face = "bold", size = 11))
+print(p_perm)
+dev.off()
+
+# Learning Curve 
+lc_data <- data_cv_ready[, c(final_features), drop = FALSE]
+lc_data$Is_Stage_IV <- as.factor(ifelse(data_cv_ready$Stage_Three == "Stage_IV", 1, 0))
+lc_data <- na.omit(lc_data)
+n_total <- nrow(lc_data)
+train_sizes <- floor(n_total * c(0.2, 0.4, 0.6, 0.8, 1.0))
+learning_results <- data.frame(Train_Size = integer(), Mean_AUC = numeric(), SD_AUC = numeric())
+
+set.seed(2026)
+for (size in train_sizes) {
+                           auc_list <- numeric(10) 
+                           for (i in 1:10) {
+                                            sample_indices <- sample(1:n_total, size)
+                                            sub_train <- lc_data[sample_indices, ]
+                                            if(length(unique(sub_train$Is_Stage_IV)) < 2 || min(table(sub_train$Is_Stage_IV)) < 2) {
+                                                                                                                                    auc_list[i] <- NA
+                                                                                                                                    next
+                                                                                                                                    }
+                                             rf_sub <- randomForest(Is_Stage_IV ~ ., data = sub_train, 
+                                             ntree = 500, 
+                                             mtry = max(floor(sqrt(length(final_features))), 1))
+    
+                                             oob_pred <- predict(rf_sub, type = "prob")[, 2]
+                                             roc_sub <- pROC::roc(sub_train$Is_Stage_IV, oob_pred, quiet = TRUE)
+                                             auc_list[i] <- as.numeric(pROC::auc(roc_sub))
+                                             }
+                              learning_results <- rbind(learning_results, data.frame(
+                                                                                     Train_Size = size,
+                                                                                     Mean_AUC = mean(auc_list, na.rm = TRUE),
+                                                                                     SD_AUC = sd(auc_list, na.rm = TRUE)
+                                                                                     ))
+                           }
+
+pdf("Learning_Curve.pdf", width = 7, height = 5.5)
+p_lc <- ggplot(learning_results, aes(x = Train_Size, y = Mean_AUC)) +
+               geom_ribbon(aes(ymin = Mean_AUC - SD_AUC, ymax = Mean_AUC + SD_AUC),fill = "#4DBBD5", alpha = 0.2) +
+               geom_line(color = "#2E9FDF", size = 1.2) +
+               geom_point(color = "#E64B35", size = 3.5) +
+               geom_errorbar(aes(ymin = Mean_AUC - SD_AUC, ymax = Mean_AUC + SD_AUC), width = 3, color = "grey50") +
+               geom_smooth(method = "loess", se = FALSE, color = "red", linetype = "dashed", alpha = 0.3, size = 0.8) +
+               theme_classic(base_size = 13) +
+               labs(title = "Learning Curve: Random Forest Model Stability",
+               subtitle = sprintf("Repeated sampling (10 times) at each size | Total n = %d", n_total),x = "Number of Training Samples", y = "Out-Of-Bag AUC (Predicting Stage IV)") +
+               theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+               plot.subtitle = element_text(hjust = 0.5, color = "gray40"),
+               panel.grid.major = element_line(color = "gray95"))
+print(p_lc)
+dev.off()
+###############
+# Figure 4 
+###############
+library(kernelshap)
+library(shapviz)
+library(dplyr)
+library(randomForest)
+
+X_all <- data_cv_ready %>% dplyr::select(all_of(final_features))
+n_samples <- nrow(X_all)
+
+formula_final <- as.formula(paste("Stage_Three ~", paste(final_features, collapse = " + ")))
+set.seed(2026)
+model_final_rf <- randomForest(formula_final, data = data_cv_ready, ntree = 500, importance = TRUE)
+prob_fun <- function(model, newdata) {
+                                     preds <- predict(model, newdata = newdata, type = "prob")
+                                     return(as.numeric(preds[, "Stage_IV"]))
+                                     }
+
+shap_S <- matrix(0, nrow = n_samples, ncol = ncol(X_all))
+colnames(shap_S) <- colnames(X_all)
+shap_baseline <- numeric(n_samples)
+pb <- txtProgressBar(min = 0, max = n_samples, style = 3)
+
+for (i in 1:n_samples) {
+                        X_explain <- X_all[i, , drop = FALSE]
+                        X_background <- X_all[-i, ]   
+                        res_i <- suppressWarnings(suppressMessages(
+                                                                   kernelshap(object = model_final_rf, X = X_explain, bg_X = X_background, pred_fun = prob_fun))
+                                                                   )
+                         shap_S[i, ] <- as.matrix(res_i$S)
+                         shap_baseline[i] <- res_i$baseline
+                         setTxtProgressBar(pb, i)
+                        }
+close(pb)
+global_baseline <- mean(shap_baseline)
+sv <- shapviz(shap_S, X = X_all, baseline = global_baseline)
+cat("\nSHAP object created successfully. Global baseline used:", global_baseline, "\n")
+#SHAP object created successfully. Global baseline used: 0.2887152
+
+# global
+p6a <- sv_importance(sv, kind = "beeswarm") +  theme_classic() +  ggtitle("SHAP Summary Plot (Predicting Stage_IV)")
+pdf("SHAP_Summary.pdf", width = 8, height = 5)
+print(p6a)
+dev.off()
+
+#case
+preds_all <- predict(model_final_rf, newdata = data_cv_ready, type = "prob")[, "Stage_IV"]
+high_risk_indices <- order(preds_all, decreasing = TRUE)
+
+patient_1_idx <- high_risk_indices[1]   ##   liver
+patient_2_idx <- high_risk_indices[3]   ##   peritoneal
+patient_3_idx <- high_risk_indices[6]   ##   peritoneal & liver
+patient_4_idx <- high_risk_indices[22]  ##   liver & lung
+
+p6b_top1 <- sv_waterfall(sv, row_id = patient_1_idx) + theme_classic() + ggtitle(paste0("Case explanation (patient #", patient_1_idx, "  liver metastasis)"))
+p6b_top2 <- sv_waterfall(sv, row_id = patient_2_idx) +  theme_classic() + ggtitle(paste0("Case explanation (patient #", patient_2_idx, "  peritoneal metastasis)"))
+p6b_top3 <- sv_waterfall(sv, row_id = patient_3_idx) + theme_classic() + ggtitle(paste0("Case explanation (patient #", patient_3_idx, "  peritoneal & liver metastasis)"))
+p6b_top4 <- sv_waterfall(sv, row_id = patient_4_idx) +  theme_classic() + ggtitle(paste0("Case explanation (patient #", patient_4_idx, "  liver & lung metastasis)"))
+
+pdf("individual_1.pdf", width = 10, height = 5)
+print(p6b_top1)
+dev.off()
+pdf("individual_2.pdf", width = 10, height = 5)
+print(p6b_top2)
+dev.off()
+pdf("individual_3.pdf", width = 10, height = 5)
+print(p6b_top3)
+dev.off()
+pdf("individual_4.pdf", width = 10, height = 5)
+print(p6b_top4)
+dev.off()
+
+extract_patient_shap <- function(idx, label) {
+                                              patient_shap <- shap_S[idx, ]
+                                              patient_feat <- X_all[idx, ]
+                                              df <- data.frame(
+                                                               Patient_Type = label,
+                                                               Patient_ID = idx,
+                                                               Feature = names(patient_shap),
+                                                               Feature_Value = as.numeric(patient_feat),
+                                                               SHAP_Contribution = as.numeric(patient_shap)
+                                                               )
+                                              df <- df[order(abs(df$SHAP_Contribution), decreasing = TRUE), ]  
+                                              return(df)
+                                              }
+df_p1 <- extract_patient_shap(patient_1_idx, "liver metastasis")
+df_p2 <- extract_patient_shap(patient_2_idx, "peritoneal metastasis")
+df_p3 <- extract_patient_shap(patient_3_idx, "peritoneal & liver metastasis")
+df_p4 <- extract_patient_shap(patient_4_idx, "liver & lung metastasis")
+
+imp_final_matrix <- importance(model_final_rf, type = 1) 
+imp_final_df <- data.frame(
+                          Feature = rownames(imp_final_matrix),
+                          Perm_Imp_Final_Model = as.numeric(imp_final_matrix)
+                          )
+imp_ensemble_df <- perm_results %>% dplyr::select(Feature, Perm_Imp_Ensemble = AUC_Drop)
+shap_global <- colMeans(abs(shap_S))
+imp_shap_df <- data.frame(
+                          Feature = names(shap_global),
+                          SHAP_Global_Mean = as.numeric(shap_global)
+                         )
+consistency_table <- imp_final_df %>% left_join(imp_ensemble_df, by = "Feature") %>% left_join(imp_shap_df, by = "Feature") %>% arrange(desc(Perm_Imp_Final_Model)) %>%
+                      mutate(
+                             Rank_Final_Perm    = rank(-Perm_Imp_Final_Model, ties.method = "min"),
+                             Rank_Ensemble_Perm = rank(-Perm_Imp_Ensemble, ties.method = "min"),
+                             Rank_SHAP          = rank(-SHAP_Global_Mean, ties.method = "min")) %>%
+                      dplyr::select(
+                                   `Biomarker` = Feature,
+                                   `Rank (Final Model)` = Rank_Final_Perm,
+                                   `Mean Decrease Accuracy (Final Model)` = Perm_Imp_Final_Model,
+                                   `Rank (CV Ensemble)` = Rank_Ensemble_Perm,
+                                   `¦¤AUC (10-fold CV Ensemble)` = Perm_Imp_Ensemble,
+                                   `Rank (Global SHAP)` = Rank_SHAP,
+                                   `Mean Absolute SHAP Value (LOO)` = SHAP_Global_Mean
+                                    )
+################
+####Figure 6
+################
+library(psych)
+library(dplyr)
+library(tidyr)
+
+cor_features <- c("CA19_9", "CA125", "CEA", "HSP90a", "GGT", "BUN", "AST", "C5DC_C5_OH", "C5DC", "Tyr_Cit", "CTC", "CD19_abs","CD4_abs","CD8_abs", "NK_abs")
+data_early <- data_clean %>%  filter(Stage_Binary == "Early") %>%  dplyr::select(all_of(cor_features))
+data_early[] <- lapply(data_early, as.numeric)
+
+data_late <- data_clean %>%  filter(Stage_Binary == "Late") %>%  dplyr::select(all_of(cor_features))
+data_late[] <- lapply(data_late, as.numeric)
+
+res_early <- corr.test(data_early, use = "pairwise", method = "spearman", adjust = "none")
+cor_matrix_early <- res_early$r
+p_matrix_early   <- res_early$p   
+n_matrix_early   <- res_early$n   
+
+res_late <- corr.test(data_late, use = "pairwise", method = "spearman", adjust = "none")
+cor_matrix_late <- res_late$r
+p_matrix_late   <- res_late$p
+n_matrix_late   <- res_late$n
+
+flatten_cor_matrix <- function(cor_mat, p_mat, n_mat, prefix = "") {
+                                                                   ut <- upper.tri(cor_mat)
+                                                                   df <- data.frame(
+                                                                                    Feature_1 = rownames(cor_mat)[row(cor_mat)[ut]],
+                                                                                    Feature_2 = rownames(cor_mat)[col(cor_mat)[ut]],
+                                                                                    R = as.numeric(cor_mat[ut]),
+                                                                                    P_value = as.numeric(p_mat[ut]), 
+                                                                                    N = as.numeric(n_mat[ut])     
+                                                                                    )
+                                                                  colnames(df)[3:5] <- paste0(c("R_", "P_value_", "N_"), prefix)
+                                                                  return(df)
+                                                                  }
+df_early <- flatten_cor_matrix(cor_matrix_early, p_matrix_early, n_matrix_early, "Stages_I_III")
+df_late  <- flatten_cor_matrix(cor_matrix_late, p_matrix_late, n_matrix_late, "Stage_IV")
+
+table_s6_data <- full_join(df_early, df_late, by = c("Feature_1", "Feature_2")) %>% 
+                           mutate(R_Stages_I_III = sprintf("%.3f", R_Stages_I_III),
+                                  R_Stage_IV = sprintf("%.3f", R_Stage_IV),
+                                  P_value_Stages_I_III = ifelse(P_value_Stages_I_III < 0.001, "<0.001", sprintf("%.3f", P_value_Stages_I_III)),
+                                  P_value_Stage_IV = ifelse(P_value_Stage_IV < 0.001, "<0.001", sprintf("%.3f", P_value_Stage_IV)),
+                                  N_Stages_I_III = as.integer(N_Stages_I_III),
+                                  N_Stage_IV = as.integer(N_Stage_IV)) %>%
+                           arrange(Feature_1, Feature_2)
+
+pdf("Correlation_Comparison.pdf", width = 13, height = 6)
+par(mfrow = c(1, 2))
+col_palette <- colorRampPalette(c("#3C5488", "white", "#E64B35"))(200)
+
+corrplot(cor_matrix_early, p.mat = p_matrix_early, method = "color", type = "upper",
+         sig.level = c(0.001, 0.01, 0.05), pch.cex = 0.9,
+         insig = "label_sig", pch.col = "white",
+         col = col_palette,
+         tl.col = "black", tl.srt = 45, diag = FALSE, 
+         title = "Stage I-III (locoregional)", 
+         mar = c(0, 0, 2, 0)) 
+corrplot(cor_matrix_late, p.mat = p_matrix_late, method = "color", type = "upper",
+         sig.level = c(0.001, 0.01, 0.05), pch.cex = 0.9,
+         insig = "label_sig", pch.col = "white",
+         col = col_palette,
+         tl.col = "black", tl.srt = 45, diag = FALSE, 
+         title = "Stage IV (distant metastasis)", 
+         mar = c(0, 0, 2, 0))
+dev.off()
+
+data_scatter <- data_clean %>% filter(Stage_Binary %in% c("Early", "Late"))
+data_scatter$Stage_Binary <- factor(data_scatter$Stage_Binary, levels = c("Early", "Late"))
+
+fig5b <- ggplot(data_scatter, aes(x = GGT, y = CD8_abs, color = Stage_Binary, fill = Stage_Binary)) +
+                 geom_point(alpha = 0.6, size = 2) +
+                 geom_smooth(method = "lm", alpha = 0.2) +
+                 scale_color_manual(values = c("Early" = "#4DBBD5", "Late" = "#E64B35")) +
+                 scale_fill_manual(values = c("Early" = "#4DBBD5", "Late" = "#E64B35")) +
+                 stat_cor(method = "spearman", aes(color = Stage_Binary), label.x.npc = "left",  r.accuracy = 0.001,p.accuracy = 0.001) +
+                 labs(x = "GGT concentration", y = "CD8 cells (absolute count)", 
+                 title = "Stage-dependent Immuno-Metabolic Coupling") +
+                 theme_classic(base_size = 13) +
+                 theme(legend.position = "top", legend.title = element_blank())
+ggsave("Scatter_Boxplot_ggt_vs_cd8.pdf", fig5b, width = 7, height = 5)
+
+fig5b <- ggplot(data_scatter, aes(x = AST, y = CD8_abs, color = Stage_Binary, fill = Stage_Binary)) +
+                 geom_point(alpha = 0.6, size = 2) +
+                 geom_smooth(method = "lm", alpha = 0.2) +
+                 scale_color_manual(values = c("Early" = "#4DBBD5", "Late" = "#E64B35")) +
+                 scale_fill_manual(values = c("Early" = "#4DBBD5", "Late" = "#E64B35")) +
+                 stat_cor(method = "spearman", aes(color = Stage_Binary), label.x.npc = "left", r.accuracy = 0.001,p.accuracy = 0.001 ) +
+                 labs(x = "AST concentration (U/L)", y = "CD8+ T cells (absolute count)", 
+                 title = "Stage-dependent Immuno-Metabolic Coupling") +
+                 theme_classic(base_size = 13) +
+                 theme(legend.position = "top", legend.title = element_blank())
+ggsave("Scatter_Boxplot_ast_cd8.pdf", fig5b, width = 7, height = 5)
+
+fig5b <- ggplot(data_scatter, aes(x = GGT, y = CD4_abs, color = Stage_Binary, fill = Stage_Binary)) +
+                 geom_point(alpha = 0.6, size = 2) +
+                 geom_smooth(method = "lm", alpha = 0.2) +
+                 scale_color_manual(values = c("Early" = "#4DBBD5", "Late" = "#E64B35")) +
+                 scale_fill_manual(values = c("Early" = "#4DBBD5", "Late" = "#E64B35")) +
+                 stat_cor(method = "spearman", aes(color = Stage_Binary), label.x.npc = "left",  r.accuracy = 0.001,p.accuracy = 0.001) +
+                 labs(x = "GGT concentration", y = "CD4 cells (absolute count)", 
+                 title = "Stage-dependent Immuno-Metabolic Coupling") +
+                 theme_classic(base_size = 13) +
+                 theme(legend.position = "top", legend.title = element_blank())
+ggsave("Scatter_Boxplot_ggt_vs_cd4.pdf", fig5b, width = 7, height = 5)
+
+fig5b <- ggplot(data_scatter, aes(x = AST, y = CD4_abs, color = Stage_Binary, fill = Stage_Binary)) +
+                 geom_point(alpha = 0.6, size = 2) +
+                 geom_smooth(method = "lm", alpha = 0.2) +
+                 scale_color_manual(values = c("Early" = "#4DBBD5", "Late" = "#E64B35")) +
+                 scale_fill_manual(values = c("Early" = "#4DBBD5", "Late" = "#E64B35")) +
+                 stat_cor(method = "spearman", aes(color = Stage_Binary), label.x.npc = "left",  r.accuracy = 0.001,p.accuracy = 0.001) +
+                 labs(x = "AST concentration", y = "CD4 cells (absolute count)", 
+                 title = "Stage-dependent Immuno-Metabolic Coupling") +
+                 theme_classic(base_size = 13) +
+                 theme(legend.position = "top", legend.title = element_blank())
+ggsave("Scatter_Boxplot_ast_vs_cd4.pdf", fig5b, width = 7, height = 5)
+##############################
+##Figure 7£¬Figures S10,S11  
+###############################
+library(rms)
+library(pROC)
+library(MASS)
+
+nomo_data_full <- data.frame( 
+                             is_Stage_IV = oof_rf$Is_Stage_IV,   
+                             Age = as.factor(oof_rf$Age),  
+                             Gender = as.factor(oof_rf$Gender),  
+                             Tumor_site = as.factor(oof_rf$Tumor_site),
+                             Risk_Score = as.numeric(oof_rf$Stage_IV * 100), 
+                             row.names = oof_rf$Sample_ID
+                             )
+nomo_data_full <- na.omit(nomo_data_full)
+full_glm <- glm(is_Stage_IV ~ Age + Gender + Tumor_site + Risk_Score, data = nomo_data_full, family = binomial)
+step_glm <- step(full_glm, direction = "both", trace = 0) 
+print(formula(step_glm))
+##is_Stage_IV ~ Age + Tumor_site + Risk_Score
+final_formula <- formula(step_glm)
+
+dd <- datadist(nomo_data_full)
+options(datadist = 'dd')
+
+# Nomogram model ( AIC filtered variates)
+nomo_model <- lrm(final_formula, data = nomo_data_full, x = TRUE, y = TRUE)
+print(nomo_model)
+
+# OOF ROC 
+train_pred_nomo <- predict(nomo_model, type = "fitted")
+clin_glm <- glm(is_Stage_IV ~ Age + Tumor_site, data = nomo_data_full, family = binomial)
+train_pred_clin <- predict(clin_glm, type = "response")
+
+train_pred_risk <- nomo_data_full$Risk_Score / 100
+roc_train_nomo <- roc(nomo_data_full$is_Stage_IV, train_pred_nomo, quiet = TRUE)
+roc_train_risk <- roc(nomo_data_full$is_Stage_IV, train_pred_risk, quiet = TRUE)
+roc_train_clin <- roc(nomo_data_full$is_Stage_IV, train_pred_clin, quiet = TRUE)
+
+calc_metrics_with_ci <- function(roc_obj, actual_labels, pred_probs, model_name) {
+                                                                                  y_true <- as.numeric(as.character(actual_labels))  
+                                                                                  auc_ci <- pROC::ci.auc(roc_obj)
+                                                                                  auc_val <- auc_ci[2]; auc_low <- auc_ci[1]; auc_up <- auc_ci[3] 
+                                                                                  best_coords <- pROC::coords(roc_obj, "best", ret = c("threshold"), transpose = FALSE)
+                                                                                  thresh <- best_coords$threshold[1]
+                                                                                  y_pred <- ifelse(pred_probs >= thresh, 1, 0)
+                                                                                  TP <- sum(y_pred == 1 & y_true == 1)
+                                                                                  TN <- sum(y_pred == 0 & y_true == 0)
+                                                                                  FP <- sum(y_pred == 1 & y_true == 0)
+                                                                                  FN <- sum(y_pred == 0 & y_true == 1)
+                                                                                  acc_test  <- binom.test(TP + TN, TP + TN + FP + FN)
+                                                                                  sens_test <- binom.test(TP, TP + FN)
+                                                                                  spec_test <- binom.test(TN, TN + FP)
+  
+                       res <- data.frame(
+                                         Model = model_name,
+                                         AUC = sprintf("%.3f (%.3f-%.3f)", auc_val, auc_low, auc_up),
+                                         Accuracy = sprintf("%.3f (%.3f-%.3f)", acc_test$estimate, acc_test$conf.int[1], acc_test$conf.int[2]),
+                                         Sensitivity = sprintf("%.3f (%.3f-%.3f)", sens_test$estimate, sens_test$conf.int[1], sens_test$conf.int[2]),
+                                         Specificity = sprintf("%.3f (%.3f-%.3f)", spec_test$estimate, spec_test$conf.int[1], spec_test$conf.int[2]),
+                                         stringsAsFactors = FALSE
+                                         )
+                       return(res)
+}
+
+metrics_nomo <- calc_metrics_with_ci(roc_train_nomo, nomo_data_full$is_Stage_IV, train_pred_nomo, "Nomogram")
+metrics_risk <- calc_metrics_with_ci(roc_train_risk, nomo_data_full$is_Stage_IV, train_pred_risk, "Risk Score")
+metrics_clin <- calc_metrics_with_ci(roc_train_clin, nomo_data_full$is_Stage_IV, train_pred_clin, "Clinical Only")
+
+final_metrics_table <- rbind(metrics_nomo, metrics_risk, metrics_clin)
+
+auc_val_nomo <- sprintf("%.3f", auc(roc_train_nomo))
+auc_val_risk <- sprintf("%.3f", auc(roc_train_risk))
+auc_val_clin <- sprintf("%.3f", auc(roc_train_clin))
+pdf("Training_Comparison_ROC.pdf", width = 5.5, height = 5.5)
+
+plot(roc_train_nomo, col = "#E41A1C", lwd = 3, legacy.axes = TRUE, main = "Training Set ROC Comparison",
+     xlab = "False Positive Rate (1 - Specificity)", ylab = "True Positive Rate (Sensitivity)")
+
+plot(roc_train_risk, col = "#377EB8", lwd = 2, lty = 2, add = TRUE)
+plot(roc_train_clin, col = "#4DAF4A", lwd = 2, lty = 3, add = TRUE)
+legend("bottomright", 
+        legend = c(paste0("Nomogram (AUC = ", auc_val_nomo, ")"),
+                  paste0("Risk Score (AUC = ", auc_val_risk, ")"),
+                  paste0("Clinical Only (AUC = ", auc_val_clin, ")")),
+       col = c("#E41A1C", "#377EB8", "#4DAF4A"), lwd = c(3, 2, 2), lty = c(1, 2, 3), bty = "n", cex = 0.95)
+
+dev.off()
+#========================================================================
+nom <- nomogram(nomo_model, fun = plogis, lp = FALSE, fun.at = c(0.05, 0.1, 0.3, 0.5, 0.7, 0.9, 0.95),  funlabel = "Probability of stage IV") 
+pdf("Clinical_Nomogram.pdf", width = 10, height = 7)
+plot(nom, xfrac = 0.35, cex.var = 1.1, cex.axis = 0.8, col.grid = "grey90")
+dev.off()
+
+set.seed(2026) 
+cal <- calibrate(nomo_model, method = "boot", B = 1000) 
+pdf("Calibration.pdf", width = 6, height = 6)
+plot(cal, xlab = "Predicted probability of stage IV", ylab = "Actual stage IV proportion", main = "Calibration curve (OOF validated)", subtitles = FALSE) 
+dev.off()
+
+#Survival Analysis (stage I-III)
+data_stage_123_oof <- oof_rf[oof_rf$Actual_Stage != "Stage_IV", ]
+data_stage_123_oof$Risk_Score <- as.numeric(data_stage_123_oof$Stage_IV * 100)
+data_stage_123_oof$Sample_ID <- as.character(data_stage_123_oof$Sample_ID)
+follow_up_data <- read.table("well_organized_data_cleaned_follow_up.txt", header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+follow_up_data$Sample_ID <- as.character(follow_up_data$Sample_ID)
+data_surv_merged <- merge(data_stage_123_oof, follow_up_data, by = "Sample_ID", all.x = TRUE)
+
+fixed_cutoff <- median(data_surv_merged$Risk_Score, na.rm = TRUE)
+data_surv_merged$Risk_Group <- ifelse(data_surv_merged$Risk_Score >= fixed_cutoff, "high", "low")
+data_surv_merged$Risk_Group <- factor(data_surv_merged$Risk_Group, levels = c("low", "high"))
+
+data_os <- data_surv_merged[, c("Sample_ID", "Risk_Score", "Risk_Group", "Time_month", "Overall_survival")]
+data_os <- na.omit(data_os)
+data_os$OS_time <- as.numeric(data_os$Time_month)
+data_os$OS_status <- as.numeric(data_os$Overall_survival)
+
+library(survival)
+library(survminer)
+fit_os <- survfit(Surv(OS_time, OS_status) ~ Risk_Group, data = data_os)
+pdf("KM_Survival_OS.pdf", width = 7, height = 7)
+p_os <- ggsurvplot(
+                   fit_os, data = data_os,
+                   pval = TRUE, conf.int = TRUE, risk.table = TRUE, risk.table.col = "strata",
+                   palette = c("#2E9FDF", "#E7B800"),
+                   title = "Overall Survival in Stage I-III Patients",
+                   xlab = "Time (Months)", ylab = "Overall Survival Probability",
+                   legend.title = "Risk Group", legend.labs = c("Low Risk", "High Risk")
+                   )
+print(p_os)
+dev.off()
+
+# OS Cox
+cox_os <- coxph(Surv(OS_time, OS_status) ~ Risk_Group, data = data_os)
+
+# Multivariate Cox Regression & Forest Plot
+library(survival)
+library(survminer)
+
+data_multi <- data_surv_merged[,c("Sample_ID", "Risk_Group", "Age", "Gender","Tumor_site", "Actual_Stage","Time_month", "Overall_survival")]
+data_multi <- na.omit(data_multi)
+data_multi$OS_time <- as.numeric(data_multi$Time_month)
+data_multi$OS_status <- as.numeric(data_multi$Overall_survival)
+data_multi$Risk_Group <- factor(data_multi$Risk_Group, levels = c("low", "high"))
+data_multi$Age <- factor(data_multi$Age, levels = c("< 65", ">= 65"))
+data_multi$Gender <- factor(data_multi$Gender, levels = c("Female", "Male"))
+data_multi$Tumor_site <- factor(data_multi$Tumor_site, levels = c("Colon", "Rectum"))
+data_multi$Actual_Stage <- factor(data_multi$Actual_Stage, levels = c("Stage_I_II", "Stage_III"))
+
+multi_cox_os <- coxph(Surv(OS_time, OS_status) ~ Risk_Group + Age + Gender + Tumor_site + Actual_Stage, data = data_multi)
+print(multi_cox_os)
+coxph(formula = Surv(OS_time, OS_status) ~ Risk_Group + Age + Gender + Tumor_site + Actual_Stage, data = data_multi)
+ph_test <- cox.zph(multi_cox_os)
+print(ph_test) 
+
+pdf("Schoenfeld_Residuals.pdf", width = 10, height = 8)
+p_zph <- ggcoxzph(ph_test, font.main = 12, font.x = 10, font.y = 10)
+print(p_zph)
+dev.off()
+
+pdf("Multivariate_Forest_OS.pdf", width = 8, height = 6)
+p_forest <- ggforest(multi_cox_os, data = data_multi,main = "Multivariate Cox Regression (Overall Survival)",fontsize = 1.0, refLabel = "reference", noDigits = 2)
+print(p_forest)
+dev.off()
+
+## external validate
+library(survival)
+library(survminer)
+library(pROC)
+library(caret)
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+library(tidyverse)
+
+oof_rf_stage123 <- oof_rf[oof_rf$Actual_Stage != "Stage_IV", ]
+internal_cutoff <- median(oof_rf_stage123$Stage_IV * 100, na.rm = TRUE)
+ext <- read.delim("external_60_data", header = TRUE, sep = "\t", na.strings = c("", "NA", "NULL", " "),  stringsAsFactors = FALSE)
+clean_lod_symbols <- function(x) {
+                                  if (is.numeric(x)) return(x) 
+                                  x_str <- trimws(as.character(x)) 
+                                  x_no_na <- x_str[!is.na(x_str)]
+                                  if (length(x_no_na) == 0) return(as.numeric(x_str))                                
+                                  is_valid <- grepl("^([<>]?)[-+]?[0-9]*\\.?[0-9]+$", x_no_na)
+                                  if (all(is_valid)) {                                               
+                                                      is_less <- grepl("^<", x_str)
+                                                      num_val <- suppressWarnings(as.numeric(gsub("[<>]", "", x_str)))
+                                                      num_val[is_less & !is.na(is_less)] <- num_val[is_less & !is.na(is_less)] / 2   
+                                                      return(num_val)
+                                                     } 
+                                  else {                                                  
+                                        return(x)
+                                       }
+                                 }
+ext_cleaned_symbols <- ext %>% mutate(across(everything(), clean_lod_symbols))
+ext_numeric_fixed <- ext_cleaned_symbols %>% mutate(across(where(is.integer), as.numeric))
+missing_rate <- colMeans(is.na(ext_numeric_fixed))
+cols_to_keep <- names(missing_rate[missing_rate <= 0.5])
+ext_filtered <- ext_numeric_fixed %>% dplyr::select(all_of(cols_to_keep))
+get_mode <- function(v) { uniqv <- unique(na.omit(v)); uniqv[which.max(tabulate(match(v, uniqv)))] }
+ext_final <- ext_filtered %>% mutate(
+                                     across(where(is.numeric), ~replace_na(., median(., na.rm = TRUE))),
+                                     across(where(is.character), ~replace_na(., get_mode(.)))
+                                    )
+ext_final -> ext
+ext$AJCC_Main <- as.numeric(gsub("[abc]", "", ext$AJCC))
+ext$Stage_Three <- case_when(
+                             ext$AJCC_Main %in% c(1, 2) ~ "Stage_I_II",
+                             ext$AJCC_Main == 3 ~ "Stage_III",
+                             ext$AJCC_Main == 4 ~ "Stage_IV",
+                             TRUE ~ NA_character_
+                            )
+ext$Stage_Three <- factor(ext$Stage_Three, levels = c("Stage_I_II", "Stage_III", "Stage_IV"))
+ext$Is_Stage_IV <- ifelse(ext$Stage_Three == "Stage_IV", 1, 0)
+ext$Age <- ifelse(ext$Age < 65, "< 65", ">= 65")
+ext$Gender <- ifelse(grepl("(?i)^m", ext$Gender), "Male",  ifelse(grepl("(?i)^f", ext$Gender), "Female", NA))
+ext$Tumor_site <- ifelse(grepl("(?i)rectum", ext$Tumor_site), "Rectum", "Colon")
+data_ext <- ext
+
+rf_models_list <- readRDS("rf_10_models_ensemble.rds")
+n_ext <- nrow(data_ext)
+
+pred_matrix <- matrix(NA, nrow = n_ext, ncol = 10)
+for (i in 1:10) {
+                current_rf <- rf_models_list[[i]]
+                prob_ext <- predict(current_rf, newdata = data_ext, type = "prob")
+                pred_matrix[, i] <- prob_ext[, "Stage_IV"]
+                }
+data_ext$Stage_IV_Mean_Prob <- rowMeans(pred_matrix)
+data_ext$Risk_Score <- data_ext$Stage_IV_Mean_Prob * 100
+
+ext_nomo_df <- data_ext[, c("Symbol", "Is_Stage_IV", "Age", "Tumor_site", "Risk_Score")]
+ext_nomo_df <- na.omit(ext_nomo_df)
+y_true_ext <- as.numeric(as.character(ext_nomo_df$Is_Stage_IV))
+
+ext_pred_nomo <- predict(nomo_model, newdata = ext_nomo_df, type = "fitted")
+ext_pred_clin <- predict(clin_glm, newdata = ext_nomo_df, type = "response")
+ext_pred_risk <- ext_nomo_df$Risk_Score / 100
+
+roc_ext_nomo <- roc(y_true_ext, ext_pred_nomo, quiet = TRUE)
+roc_ext_clin <- roc(y_true_ext, ext_pred_clin, quiet = TRUE)
+roc_ext_risk <- roc(y_true_ext, ext_pred_risk, quiet = TRUE)
+
+if(!exists("calc_metrics_with_ci")) {
+                                    calc_metrics_with_ci <- function(roc_obj, actual_labels, pred_probs, model_name) {
+                                                                                                                      y_true <- as.numeric(as.character(actual_labels))
+                                                                                                                      auc_ci <- pROC::ci.auc(roc_obj)
+                                                                                                                      best_coords <- pROC::coords(roc_obj, "best", ret = c("threshold"), transpose = FALSE)
+                                                                                                                      thresh <- best_coords$threshold[1]
+                                                                                                                      y_pred <- ifelse(pred_probs >= thresh, 1, 0)
+    
+                                                                                                                      TP <- sum(y_pred == 1 & y_true == 1); TN <- sum(y_pred == 0 & y_true == 0)
+                                                                                                                      FP <- sum(y_pred == 1 & y_true == 0); FN <- sum(y_pred == 0 & y_true == 1)    
+                                                                                                                      acc_test  <- binom.test(TP + TN, TP + TN + FP + FN)
+                                                                                                                      sens_test <- binom.test(TP, TP + FN)
+                                                                                                                      spec_test <- binom.test(TN, TN + FP)    
+                                                                                                                      data.frame(
+                                                                                                                                 Model = model_name,
+                                                                                                                                 AUC = sprintf("%.3f (%.3f-%.3f)", auc_ci[2], auc_ci[1], auc_ci[3]),
+                                                                                                                                 Accuracy = sprintf("%.3f (%.3f-%.3f)", acc_test$estimate, acc_test$conf.int[1], acc_test$conf.int[2]),
+                                                                                                                                 Sensitivity = sprintf("%.3f (%.3f-%.3f)", sens_test$estimate, sens_test$conf.int[1], sens_test$conf.int[2]),
+                                                                                                                                 Specificity = sprintf("%.3f (%.3f-%.3f)", spec_test$estimate, spec_test$conf.int[1], spec_test$conf.int[2]),
+                                                                                                                                 stringsAsFactors = FALSE
+                                                                                                                                 )
+                                                                                                                       }
+                                 }
+ext_metrics_nomo <- calc_metrics_with_ci(roc_ext_nomo, y_true_ext, ext_pred_nomo, "Nomogram")
+ext_metrics_risk <- calc_metrics_with_ci(roc_ext_risk, y_true_ext, ext_pred_risk, "Risk Score")
+ext_metrics_clin <- calc_metrics_with_ci(roc_ext_clin, y_true_ext, ext_pred_clin, "Clinical Only")
+ext_final_table <- rbind(ext_metrics_nomo, ext_metrics_risk, ext_metrics_clin)
+ext_final_table <- cbind(Cohort = "External Validation", ext_final_table)
+
+auc_val_nomo <- sprintf("%.3f", auc(roc_ext_nomo))
+auc_val_risk <- sprintf("%.3f", auc(roc_ext_risk))
+auc_val_clin <- sprintf("%.3f", auc(roc_ext_clin))
+pdf("External_Comparison_ROC_new.pdf", width = 5.5, height = 5.5)
+plot(roc_ext_nomo, col = "#E41A1C", lwd = 3, legacy.axes = TRUE, main = "External Validation ROC Comparison",
+     xlab = "False Positive Rate (1 - Specificity)",ylab = "True Positive Rate (Sensitivity)")
+plot(roc_ext_risk, col = "#377EB8", lwd = 2, lty = 2, add = TRUE)
+plot(roc_ext_clin, col = "#4DAF4A", lwd = 2, lty = 3, add = TRUE)
+legend("bottomright", 
+       legend = c(paste0("Nomogram (AUC = ", auc_val_nomo, ")"),
+                  paste0("Risk Score (AUC = ", auc_val_risk, ")"),
+                  paste0("Clinical Only (AUC = ", auc_val_clin, ")")),
+       col = c("#E41A1C", "#377EB8", "#4DAF4A"),lwd = c(3, 2, 2), lty = c(1, 2, 3), bty = "n", cex = 0.95)
+dev.off()
+
+#  C-index and Calibration
+data_ext$is_Stage_IV <- data_ext$Is_Stage_IV 
+data_ext$Age <- as.factor(data_ext$Age)
+data_ext$Tumor_site <- as.factor(data_ext$Tumor_site)
+
+ext_nomo_df <- data_ext[, c("Symbol", "Is_Stage_IV", "Age", "Tumor_site", "Risk_Score")]
+ext_nomo_df <- na.omit(ext_nomo_df)
+ext_nomo_pred <- predict(nomo_model, newdata = ext_nomo_df, type = "fitted")
+
+pdf("External_Nomogram_Calibration.pdf", width = 6.5, height = 6.5)
+ext_val_stats <- val.prob(ext_nomo_pred, ext_nomo_df$Is_Stage_IV, m = 15, cex = 0.8, xlab = "Nomogram Predicted Probability",ylab = "Actual Stage IV Proportion") 
+title(main = "External Calibration curve (Strictly Independent)", line = 2)
+dev.off()
+
+c_index_ext <- ext_val_stats["C (ROC)"]
+brier_ext <- ext_val_stats["Brier"]
+
+delong_train <- roc.test(roc_train_nomo, roc_train_clin, method = "delong")
+delong_ext <- roc.test(roc_ext_nomo, roc_ext_clin, method = "delong")
+
+##NRI
+nri_data_train <- data.frame(
+                             outcome = as.numeric(as.character(roc_train_clin$original.response)), 
+                             p_clin  = roc_train_clin$predictor,  
+                             p_nomo  = roc_train_nomo$predictor   
+                            )
+
+nri_results_train <- reclassification(
+                                     data = nri_data_train, 
+                                     cOutcome = 1,                 
+                                     predrisk1 = nri_data_train$p_clin,  
+                                     predrisk2 = nri_data_train$p_nomo,  
+                                     cutoff = c(0, 0.5, 1)         
+                                     )
+
+library(PredictABEL)
+
+nri_data <- data.frame(
+                      outcome = as.numeric(as.character(ext_nomo_df$Is_Stage_IV)), 
+                      p_clin  = ext_pred_clin,                                     
+                      p_nomo  = ext_pred_nomo                                     
+                      )
+nri_results <- reclassification(
+                                data = nri_data, 
+                                cOutcome = 1,                 
+                                predrisk1 = nri_data$p_clin, 
+                                predrisk2 = nri_data$p_nomo,
+                                cutoff = c(0, 0.5, 1)     
+                                )
+
+## metastasis
+library(dplyr)
+library(ggplot2)
+library(pROC)
+library(patchwork)
+library(ggpubr)
+library(tidyr)
+
+fmt_p <- function(p) {
+                     if (is.na(p)) return("P = NA")
+                     if (p < 1e-4) return(sprintf("P = %.2e", p))
+                     sprintf("P = %.4f", p)
+                     }
+dfs_internal <- read.delim("well_organized_data_cleaned_I_III_DFS.txt", header = TRUE, sep = "\t", stringsAsFactors = FALSE) %>% mutate(Symbol = trimws(Symbol), across(starts_with("OP_"), as.numeric))
+internal_data <- oof_rf %>% filter(Actual_Stage != "Stage_IV") %>% mutate(
+                                                                          Symbol     = trimws(as.character(Sample_ID)),
+                                                                          Age        = factor(as.character(Age), levels = levels(nomo_data_full$Age)),
+                                                                          Tumor_site = factor(as.character(Tumor_site), levels = levels(nomo_data_full$Tumor_site)),
+                                                                          Risk_Score = as.numeric(Stage_IV) * 100) %>% 
+                dplyr::select(Symbol, Age, Tumor_site, Risk_Score) %>% inner_join(dfs_internal, by = "Symbol")
+internal_data$Nomogram_Prob <- as.numeric(predict(nomo_model, newdata = internal_data, type = "fitted"))
+
+dfs_external <- read.delim("external_60_data_cleaned_I_III_DFS.txt", header = TRUE, sep = "\t", stringsAsFactors = FALSE) %>% mutate(Symbol = trimws(Symbol), across(starts_with("OP_"), as.numeric))
+external_data <- data_ext %>% filter(Stage_Three != "Stage_IV") %>% mutate(
+                                                                           Symbol     = trimws(as.character(Symbol)),
+                                                                           Age        = factor(as.character(Age), levels = levels(nomo_data_full$Age)),
+                                                                           Tumor_site = factor(as.character(Tumor_site), levels = levels(nomo_data_full$Tumor_site))) %>%
+                 dplyr::select(Symbol, Age, Tumor_site, Risk_Score) %>% inner_join(dfs_external, by = "Symbol")
+external_data$Nomogram_Prob <- as.numeric(predict(nomo_model, newdata = external_data, type = "fitted"))
+
+roc_for_cutoff <- roc(internal_data$OP_3y, internal_data$Nomogram_Prob, quiet = TRUE)
+best_thresholds <- pROC::coords(roc_for_cutoff, "best", best.method = "youden", ret = c("threshold", "specificity", "sensitivity"), transpose = FALSE)
+optimal_cutoff <- as.numeric(best_thresholds$threshold[1])
+
+## DCA 
+generate_dca_plot <- function(df, cutoff, cohort_label, out_path) {
+                                                                   thresholds <- seq(0, 0.40, by = 0.01) 
+                                                                   N <- nrow(df)
+                                                                   prev <- sum(df$OP_3y, na.rm = TRUE) / N  
+                                                                   dca_data <- data.frame(threshold = thresholds)
+                                                                   dca_data$Treat_All <- prev - (1 - prev) * (thresholds / (1 - thresholds))
+                                                                   dca_data$Treat_None <- 0
+                                                                   dca_data$Model <- sapply(thresholds, function(pt) {
+                                                                                                                      tp <- sum(df$Nomogram_Prob >= pt & df$OP_3y == 1, na.rm = TRUE)
+                                                                                                                      fp <- sum(df$Nomogram_Prob >= pt & df$OP_3y == 0, na.rm = TRUE)
+                                                                                                                      (tp / N) - (fp / N) * (pt / (1 - pt))
+                                                                                                                      }}
+  
+dca_long <- dca_data %>% pivot_longer(cols = c("Treat_All", "Treat_None", "Model"), names_to = "Strategy", values_to = "Net_Benefit") %>%
+            mutate(Strategy = factor(Strategy, levels = c("Treat_None", "Treat_All", "Model"), labels = c("Treat None", "Treat All", "Nomogram")))
+nb_at_cutoff <- dca_data$Model[which.min(abs(dca_data$threshold - cutoff))]
+p_dca <- ggplot(dca_long, aes(x = threshold, y = Net_Benefit, color = Strategy)) +
+         geom_line(linewidth = 1) +
+         scale_color_manual(values = c("Treat None" = "black", "Treat All" = "grey50", "Nomogram" = "#E41A1C")) +
+         coord_cartesian(ylim = c(-0.02, max(dca_data$Model, na.rm = TRUE) * 1.2), xlim = c(0, 0.4)) +
+         geom_vline(xintercept = cutoff, linetype = "dashed", color = "#377EB8", linewidth = 0.8) +
+         geom_point(data = data.frame(x = cutoff, y = nb_at_cutoff), aes(x = x, y = y), color = "#377EB8", size = 3, inherit.aes = FALSE) +
+         annotate("text", x = cutoff + 0.01, y = max(dca_data$Model, na.rm=T) * 0.9, 
+                   label = sprintf("Optimal Cutoff: %.2f%%\nMax Net Benefit", cutoff * 100), 
+                   color = "#377EB8", hjust = 0, size = 4, fontface = "bold") +
+         theme_classic(base_size = 13) +
+         labs(title = paste0(cohort_label, ": Decision Curve"), x = "Threshold Probability", y = "Net Benefit") +
+         theme(legend.position = c(0.8, 0.8), legend.title = element_blank(), legend.background = element_rect(fill="transparent"))
+         ggsave(out_path, plot = p_dca, width = 5.5, height = 5.5)
+         return(p_dca)
+}
+
+p_dca_int <- generate_dca_plot(internal_data, optimal_cutoff, "Internal Cohort", file.path(out_dir, "Internal_DCA.pdf"))
+p_dca_ext <- generate_dca_plot(external_data, optimal_cutoff, "External Cohort", file.path(out_dir, "External_DCA.pdf"))
+
+assign_risk <- function(d, cutoff) {d %>% mutate(Risk_Group = factor(ifelse(Nomogram_Prob >= cutoff, "High Risk", "Low Risk"), levels = c("Low Risk", "High Risk")))}
+internal_data <- assign_risk(internal_data, optimal_cutoff)
+external_data <- assign_risk(external_data, optimal_cutoff)
+
+plot_time_roc <- function(d, cohort_label, file_path, cutoff) {
+                                                               clean_d <- d %>% filter(!is.na(OP_3y), !is.na(Nomogram_Prob))
+                                                               r <- roc(clean_d$OP_3y, clean_d$Nomogram_Prob, quiet = TRUE)
+                                                               ci_res <- as.numeric(ci.auc(r))
+                                                               coords_res <- pROC::coords(r, x = cutoff, input = "threshold", ret = c("sensitivity", "specificity"), transpose = FALSE)
+                                                               sens <- coords_res$sensitivity[1]
+                                                               spec <- coords_res$specificity[1]
+                                                               wt <- wilcox.test(Nomogram_Prob ~ OP_3y, data = clean_d)
+                                                               pval <- wt$p.value
+                                                               p_str <- ifelse(pval < 0.001, "P < 0.001", sprintf("P = %.4f", pval))
+                                                               anno_text <- sprintf("AUC = %.3f (%.3f-%.3f)\n%s\nSens = %.1f%%\nSpec = %.1f%%",ci_res[2], ci_res[1], ci_res[3], p_str, sens * 100, spec * 100)
+                                                               roc_list <- list("3-Year" = r)
+                                                               p_roc <- ggroc(roc_list, linewidth = 1) + 
+                                                                        scale_color_manual(values = c("#E41A1C")) + 
+                                                                        geom_abline(slope = 1, intercept = 1, linetype = "dashed", color = "grey50") +
+                                                                        annotate("text", x = 0.45, y = 0.25, label = anno_text, hjust = 0, size = 4.5, fontface = "bold") + 
+                                                                        theme_classic(base_size = 13) + 
+                                                                        theme(legend.position = "none") +
+                                                                        labs(title = paste0(cohort_label, ": ROC Curve"), x = "Specificity", y = "Sensitivity")
+                                                               ggsave(file_path, plot = p_roc, width = 5.5, height = 5.5)
+                                                               data.frame(
+                                                                          Cohort = cohort_label, Timepoint = "3-Year", N = nrow(clean_d), Events = sum(clean_d$OP_3y == 1),
+                                                                          AUC_95CI = sprintf("%.3f (%.3f-%.3f)", ci_res[2], ci_res[1], ci_res[3]),
+                                                                          Sensitivity = sprintf("%.1f%%", sens * 100),
+                                                                          Specificity = sprintf("%.1f%%", spec * 100),
+                                                                          P_value = signif(pval, 4)
+                                                                          )
+                                                               }
+
+auc_all <- bind_rows(
+                     plot_time_roc(internal_data, "Internal Cohort", file.path(out_dir, "Internal_Recurrence_ROC.pdf"), optimal_cutoff),
+                     plot_time_roc(external_data, "External Cohort", file.path(out_dir, "External_Recurrence_ROC.pdf"), optimal_cutoff)
+                    )
+
+generate_fig7_panel <- function(data, cutoff, cohort_name) { df <- data %>%  filter(!is.na(Nomogram_Prob), !is.na(OP_3y)) %>% 
+                                                                             mutate(OP_Status = factor(ifelse(OP_3y == 1, "Recurred", "Disease-Free"),
+                                                                             levels = c("Disease-Free", "Recurred"))) %>%  arrange(Nomogram_Prob)
+                                                                        %>%  mutate(Patient_Index = row_number())
+cutoff_index <- sum(df$Nomogram_Prob < cutoff)
+p_heat_prob <- ggplot(df, aes(x = Patient_Index, y = "Nomogram Prob.", fill = Nomogram_Prob)) +
+                              geom_tile() + scale_fill_gradient(low = "#F7FBFF", high = "#CB181D", name = "Predicted\nProb.") +
+                              geom_vline(xintercept = cutoff_index + 0.5, linetype = "dashed", colour = "black", linewidth = 0.8) +
+                              scale_x_continuous(expand = expansion(mult = c(0, 0))) + theme_minimal() + 
+                              theme(axis.title = element_blank(), axis.text.x = element_blank(),
+                              panel.grid = element_blank(), axis.text.y = element_text(face = "bold", colour = "black", size = 11),
+                              plot.margin = ggplot2::margin(b = -5, unit = "pt")) 
+p_heat_status <- ggplot(df, aes(x = Patient_Index, y = "Actual Status", fill = OP_Status)) + geom_tile() +
+                                scale_fill_manual(values = c("Disease-Free" = "#E0E0E0", "Recurred" = "#252525"), name = "3-Yr Status") +
+                                geom_vline(xintercept = cutoff_index + 0.5, linetype = "dashed", colour = "black", linewidth = 0.8) +
+                                scale_x_continuous(expand = expansion(mult = c(0, 0))) + theme_minimal() +
+                                theme(axis.title.y = element_blank(), axis.text.x = element_blank(),
+                                panel.grid = element_blank(),
+                                axis.text.y = element_text(face = "bold", colour = "black", size = 11),
+                                plot.margin = ggplot2::margin(t = 0, unit = "pt")) + 
+                                xlab(paste0("Patients Ranked by Nomogram Probability (n = ", nrow(df), ")"))
+p_heatmap <- p_heat_prob / p_heat_status + plot_layout(heights = c(1, 1))

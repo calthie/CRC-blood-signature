@@ -1,0 +1,183 @@
+################################################################################
+## rebuild the UN-IMPUTED analysis set
+################################################################################
+rm(list = ls())
+suppressPackageStartupMessages({
+                               library(tidyverse); library(caret); library(praznik)
+                               library(randomForest); library(pROC); library(car); library(ggplot2)
+                                })
+dir.create("output/M6_nested", recursive = TRUE, showWarnings = FALSE)
+clean_lod_symbols <- function(x) {
+                                  if (is.numeric(x)) return(x)
+                                  x_str <- trimws(as.character(x)); x_no_na <- x_str[!is.na(x_str)]
+                                  if (length(x_no_na) == 0) return(as.numeric(x_str))
+                                  is_valid <- grepl("^([<>]?)[-+]?[0-9]*\\.?[0-9]+$", x_no_na)
+                                  if (all(is_valid)) {
+                                                     is_less  <- grepl("^<", x_str)
+                                                     num_val  <- suppressWarnings(as.numeric(gsub("[<>]", "", x_str)))
+                                                     num_val[is_less & !is.na(is_less)] <- num_val[is_less & !is.na(is_less)] / 2
+                                                     return(num_val)
+                                  } else return(x)
+                                  }
+df <- read.delim("well_organized_data", header = TRUE, sep = "\t", na.strings = c("", "NA", "NULL", " "), stringsAsFactors = FALSE)
+df_filtered <- df %>% mutate(across(everything(), clean_lod_symbols)) %>% mutate(across(where(is.integer), as.numeric)) %>% dplyr::select(all_of(names(colMeans(is.na(.)))[colMeans(is.na(.)) <= 0.5]))
+
+dat <- df_filtered
+dat$AJCC_Main   <- as.numeric(gsub("[abc]", "", dat$AJCC))
+dat$Stage_Three <- factor(case_when(dat$AJCC_Main %in% c(1,2) ~ "Stage_I_II",
+                                    dat$AJCC_Main == 3        ~ "Stage_III",
+                                    dat$AJCC_Main == 4        ~ "Stage_IV",
+                                    TRUE ~ NA_character_),  levels = c("Stage_I_II","Stage_III","Stage_IV"))
+dat$Age        <- ifelse(dat$Age < 65, "< 65", ">= 65")
+dat$Gender     <- ifelse(grepl("(?i)^m", dat$Gender), "Male", ifelse(grepl("(?i)^f", dat$Gender), "Female", NA))
+dat$Tumor_site <- ifelse(grepl("(?i)rectum", dat$Tumor_site), "Rectum", "Colon")
+
+dat <- dat %>% filter(!is.na(Stage_Three)) %>% droplevels()
+exclude_cols <- c("Symbol","Age","Gender","Blood_type","Tumor_site","T","N","M", "AJCC","AJCC_Main","Stage_Three","Stage_Binary","Reagent_LotID")
+DROP_BY_NAME <- c("Symbol", " AJCC_Main") 
+
+cand_feats <- setdiff(names(dat)[sapply(dat, is.numeric)], c(exclude_cols, DROP_BY_NAME))
+data_nested <- dat[, c("Stage_Three", cand_feats)]
+cat(sprintf("Analysis set: n = %d, candidate features = %d\n", nrow(data_nested), length(cand_feats)))
+stopifnot(nrow(data_nested) == 151)   
+################################################################################
+## in-fold imputer (fit on TRAIN only)
+################################################################################
+get_mode <- function(v){ u <- unique(na.omit(v)); if(!length(u)) return(NA); u[which.max(tabulate(match(v,u)))] }
+
+fit_imputer <- function(train_df){
+                                  num <- names(train_df)[sapply(train_df, is.numeric)]
+                                  chr <- names(train_df)[sapply(train_df, function(z) is.character(z) | is.factor(z))]
+                                  list(num_med = sapply(train_df[num], median, na.rm = TRUE),
+                                  chr_mod = sapply(train_df[chr], get_mode))
+                                  }
+apply_imputer <- function(imp, df){
+                                  for (v in names(imp$num_med)) if (v %in% names(df)) {
+                                                                                       fill <- imp$num_med[[v]]; if (is.na(fill)) fill <- 0      
+                                                                                       df[[v]][is.na(df[[v]])] <- fill
+                                                                                       }
+                                  for (v in names(imp$chr_mod)) if (v %in% names(df)) {
+                                                                                       fill <- imp$chr_mod[[v]]; if (!is.na(fill)) df[[v]][is.na(df[[v]])] <- fill
+                                                                                       }
+                                  df
+                                   }
+mc_auc <- function(y, P) as.numeric(pROC::multiclass.roc(response = y, predictor = P)$auc)
+################################################################################
+## the ENTIRE selection pipeline, fed ONLY with training data
+################################################################################
+select_panel <- function(train_data, seed = 2026,n_inner = 10, kw_thr = 0.02, jmi_thr = 0.5, top_n = 10, vif_thr = 10, verbose = FALSE){
+                                                                                                                                         y   <- train_data$Stage_Three
+                                                                                                                                         Xnm <- setdiff(names(train_data), "Stage_Three")
+                                                                                                                                         Xnm <- Xnm[sapply(train_data[Xnm], function(z) is.numeric(z) && sd(z, na.rm=TRUE) > 0)]
+                                                                                                                                         set.seed(seed)
+                                                                                                                                         inner <- createFolds(y, k = n_inner, list = TRUE, returnTrain = FALSE)
+                                                                                                                                         sel_inner <- list()
+
+                                                                                                                                         for (j in seq_len(n_inner)) {
+                                                                                                                                         itr <- train_data[-inner[[j]], , drop = FALSE]
+                                                                                                                                         igr <- itr$Stage_Three
+                                                                                                                                         iX  <- itr[, Xnm, drop = FALSE]
+                                                                                                                                         iX  <- iX[, sapply(iX, function(z) sd(z, na.rm=TRUE) > 0), drop = FALSE]
+
+                                                                                                                                          p <- suppressWarnings(apply(iX, 2, function(x) tryCatch(kruskal.test(x ~ igr)$p.value, error = function(e) NA_real_)))
+                                                                                                                                          sig <- names(p)[which(p < kw_thr)]
+                                                                                                                                          if (length(sig) < 10) sig <- names(sort(p, na.last = NA))[1:min(10, sum(!is.na(p)))]
+                                                                                                                                          if (length(sig) < 2)  { sel_inner[[j]] <- sig; next }
+
+                                                                                                                                          jm <- praznik::JMI(iX[, sig, drop = FALSE], igr, k = min(20, length(sig)))
+                                                                                                                                          keep <- which(jm$score > jmi_thr); if (!length(keep)) keep <- 1
+                                                                                                                                          sel_inner[[j]] <- names(jm$selection)[keep]
+                                                                                                                                           }
+freq <- sort(table(unlist(sel_inner)), decreasing = TRUE)
+panel <- names(freq)[1:min(top_n, length(freq))]
+
+kw_p_train <- sapply(panel, function(v) tryCatch(kruskal.test(train_data[[v]] ~ y)$p.value, error = function(e) 1))
+repeat {
+        if (length(panel) < 2) break
+        vv <- tryCatch(car::vif(lm(as.formula(paste("as.numeric(Stage_Three) ~",paste(panel, collapse = "+"))),data = train_data)), error = function(e) NULL)
+        if (is.null(vv) || !length(vv)) {
+                                        cm <- abs(cor(train_data[, panel])); diag(cm) <- 0
+                                        panel <- setdiff(panel, names(which.max(rowSums(cm)))); next
+                                        }
+        if (max(vv) < vif_thr) break
+        prob <- names(vv)[which.max(vv)]
+        cm   <- abs(cor(train_data[, panel])[, prob]); cm <- cm[names(cm) != prob]
+        part <- names(cm)[which.max(cm)]
+        drop <- if (kw_p_train[[prob]] > kw_p_train[[part]]) prob else part
+        if (verbose) cat(sprintf("   VIF drop: %s\n", drop))
+        panel <- setdiff(panel, drop)
+        }
+list(panel = panel, freq = freq, inner_sel = sel_inner)
+}
+
+################################################################################
+## OUTER loop ¡ª A(nested) vs B(semi-nested)
+################################################################################
+glob_imp   <- fit_imputer(data_nested)
+data_globI <- apply_imputer(glob_imp, data_nested)
+
+run_one_rep <- function(seed_outer, K = 10){
+                                            y <- data_nested$Stage_Three; lv <- levels(y)
+                                            set.seed(seed_outer)
+                                            folds <- createFolds(y, k = K, list = TRUE, returnTrain = FALSE)
+                                            mkP <- function() { m <- matrix(NA_real_, nrow(data_nested), length(lv)); colnames(m) <- lv; m }
+                                            P_A <- mkP(); P_B <- mkP(); sel_rec <- vector("list", K)
+
+                                            for (i in seq_len(K)) {
+                                                                   te_idx <- folds[[i]]
+
+                                                                   ## ---------- A. FULLY NESTED ----------
+                                                                   tr_raw <- data_nested[-te_idx, ]; te_raw <- data_nested[te_idx, ]
+                                                                   imp  <- fit_imputer(tr_raw)                 
+                                                                   tr_i <- apply_imputer(imp, tr_raw)
+                                                                   te_i <- apply_imputer(imp, te_raw)        
+                                                                   pa   <- select_panel(tr_i, seed = seed_outer * 100 + i)$panel
+                                                                   sel_rec[[i]] <- pa
+                                                                   set.seed(123 + i)
+                                                                   cw <- max(table(tr_i$Stage_Three)) / table(tr_i$Stage_Three)
+                                                                   mA <- randomForest(as.formula(paste("Stage_Three ~", paste(pa, collapse = "+"))), data = tr_i, ntree = 1000, classwt = cw)
+                                                                   P_A[te_idx, ] <- predict(mA, te_i[, pa, drop = FALSE], type = "prob")[, lv]
+
+                                                                   ## ---------- B. SEMI-NESTED ----------
+                                                                   trB <- data_globI[-te_idx, ]; teB <- data_globI[te_idx, ]
+                                                                   pb  <- select_panel(trB, seed = seed_outer * 100 + i)$panel
+                                                                   set.seed(123 + i)
+                                                                   mB <- randomForest(as.formula(paste("Stage_Three ~", paste(pb, collapse = "+"))), data = trB, ntree = 1000, classwt = cw)
+                                                                   P_B[te_idx, ] <- predict(mB, teB[, pb, drop = FALSE], type = "prob")[, lv]
+                                                                   }
+                                             list(A = P_A, B = P_B, sel = sel_rec)
+                                             }
+
+N_REPEATS <- 50                      
+reps <- lapply(seq_len(N_REPEATS), function(s){ cat("rep", s, "\n"); run_one_rep(123 + s) })
+################################################################################
+## AUC, paired ¦¤AUC
+################################################################################
+y <- data_nested$Stage_Three
+auc_rep <- t(sapply(reps, function(r) c(A = mc_auc(y, r$A), B = mc_auc(y, r$B))))
+summ <- data.frame(
+                    Pipeline = c("A. Fully nested (In-fold Imputation)", "B. Semi-nested (Global Imputation)"),
+                    AUC      = round(colMeans(auc_rep), 3),
+                    CI_low   = round(apply(auc_rep, 2, quantile, .025), 3),
+                    CI_high  = round(apply(auc_rep, 2, quantile, .975), 3))
+print(summ)
+delta <- data.frame(B_minus_A = auc_rep[,"B"] - auc_rep[,"A"])
+MARGIN <- 0.02                                   
+res_delta <- do.call(rbind, lapply(names(delta), function(k){
+             d <- delta[[k]]
+             data.frame(Comparison = k,
+             dAUC   = round(mean(d), 4),
+             CI_low = round(quantile(d, .025), 4),
+             CI_up  = round(quantile(d, .975), 4),
+             Non_inferior_at_0.02 = ifelse(quantile(d, .975) < MARGIN, "YES", "NO"))
+}))
+print(res_delta)
+
+boot_delta <- function(P1, P2, R = 2000, seed = 2026){
+                                                      set.seed(seed); by_cls <- split(seq_along(y), y)
+                                                      replicate(R, { ix <- unlist(lapply(by_cls, function(v) sample(v, length(v), replace = TRUE)))
+                                                                      mc_auc(y[ix], P1[ix, ]) - mc_auc(y[ix], P2[ix, ])
+                                                                    })
+                                                      }
+bd <- boot_delta(reps[[1]]$B, reps[[1]]$A)
+cat(sprintf("Bootstrap ¦¤AUC (B-A) = %.4f (95%% CI %.4f to %.4f)\n", mean(bd), quantile(bd,.025), quantile(bd,.975)))

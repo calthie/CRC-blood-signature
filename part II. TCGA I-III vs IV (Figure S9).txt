@@ -1,0 +1,74 @@
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(GSVA)
+library(limma)
+library(ggplot2)
+library(ggpubr)
+library(patchwork)
+
+raw_data <- read.table("colorectal_cancer_combined")
+stage_info <- as.character(raw_data[1, ])
+names(stage_info) <- colnames(raw_data)
+expr_mat <- as.matrix(raw_data[-1, ])
+class(expr_mat) <- "numeric"
+
+raw_gene_names <- rownames(expr_mat)
+clean_gene_names <- str_replace(raw_gene_names, "\\|.*", "")
+expr_mat_clean <- avereps(expr_mat, ID = clean_gene_names)
+
+meta_df <- data.frame(
+                      Sample = names(stage_info),
+                      Raw_Stage = stage_info,
+                      stringsAsFactors = FALSE
+                      )
+meta_df <- meta_df %>% filter(Raw_Stage != "NA" & !is.na(Raw_Stage)) %>% mutate(
+                                                                                 Stage_Group = case_when(
+                                                                                                         grepl("^IV", Raw_Stage) ~ "Stage IV",  
+                                                                                                         TRUE ~ "Stage I-III"                 
+                                                                                                         )
+                                                                                ) %>% mutate(Stage_Group = factor(Stage_Group, levels = c("Stage I-III", "Stage IV")))
+expr_subset <- expr_mat_clean[, meta_df$Sample]
+
+target_genes <- c("CEACAM5", "MUC16", "HSP90AA1", "GOT1", "GOT2", "GGT1")
+valid_genes <- intersect(target_genes, rownames(expr_subset))
+df_single_genes <- as.data.frame(t(expr_subset[valid_genes, ]))
+df_single_genes$Sample <- rownames(df_single_genes)
+
+metabolic_genesets <- list(
+                            C5DC_Production = c("AASS", "AADAT","GCDH", "DHTKD1"),
+                            Urea_Production = c("ARG1", "ARG2"),
+                            CA19_9_Biosynthesis = c("FUT3", "B3GALT5","ST3GAL3", "ST3GAL4")
+                           )
+
+if (gsva_version >= "1.50.0") {
+                               gsva_par <- gsvaParam(exprData = expr_subset, geneSets = metabolic_genesets, kcdf = "Gaussian")
+                               gsva_scores <- gsva(gsva_par)
+} else {
+        gsva_scores <- gsva(expr_subset, metabolic_genesets, method = "gsva", kcdf = "Gaussian")
+        }
+
+df_gsva <- as.data.frame(t(gsva_scores))
+df_gsva$Sample <- rownames(df_gsva)
+final_df <- meta_df %>% left_join(df_single_genes, by = "Sample") %>% left_join(df_gsva, by = "Sample")
+plot_comparison <- function(data, y_var, y_label, title) {
+                                                          ggboxplot(data, x = "Stage_Group", y = y_var,
+                                                          color = "Stage_Group", palette = c("#00A087", "#E64B35"),
+                                                          add = "jitter", add.params = list(size = 1.2, alpha = 0.6),
+                                                          ylab = y_label, xlab = FALSE, title = title) +
+                                                          stat_compare_means(method = "wilcox.test", 
+                                                          aes(label = ifelse(..p.. < 0.001, "P < 0.001", sprintf("P = %.3f", as.numeric(..p..)))),label.y.npc = 0.95, size = 4) +
+                                                              theme(legend.position = "none",plot.title = element_text(hjust = 0.5, face = "bold", size = 12),
+                                                              axis.text.x = element_text(size = 11, face = "bold"))
+                                                          }
+
+p_genes <- lapply(valid_genes, function(g) {plot_comparison(final_df, y_var = g, y_label = "Expression Level", title = g)})
+                                            gene_patchwork <- wrap_plots(p_genes, ncol = 3) + 
+                                            plot_annotation(title = "Key Genes Expression: Stage I-III vs IV",
+                                            theme = theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5)))
+
+pathway_names <- colnames(df_gsva)[-which(colnames(df_gsva) == "Sample")]
+p_pathways <- lapply(pathway_names, function(p) {
+                                                 clean_title <- gsub("_", " ", p) 
+                                                 plot_comparison(final_df, y_var = p, y_label = "GSVA Score", title = clean_title)})
+pathway_patchwork <- wrap_plots(p_pathways, ncol = 4) + plot_annotation(title = "Metabolic Signatures: Stage I-III vs IV",theme = theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5)))
